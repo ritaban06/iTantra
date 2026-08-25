@@ -1,22 +1,24 @@
 import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSTT } from '../hooks/useSTT';
+import { useLanguage } from '../state/LanguageContext';
 
 export default function HomeScreen({ navigation }: { navigation: any }) {
-  const { transcript, partial, confidence, isListening, startListening, stopListening, loadModel, isModelLoaded, downloadModel, isDownloading, downloadProgress } = useSTT();
+  const { transcript, partial, confidence, isListening, startListening, stopListening, loadModel, isModelLoaded, downloadModel, cancelDownload, isDownloading, downloadProgress, error } = useSTT();
+  const { languageName, languageCode } = useLanguage();
 
   useEffect(() => {
     const requestPermissions = async () => {
       if (Platform.OS === 'android') {
         try {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-          // For MVP, try to load English model right away if permission is granted
+          // Try to load model for selected language right away if permission is granted
           try {
-            await loadModel('en');
+            await loadModel(languageCode);
           } catch (e) {
             // Model not found, start download
-            await downloadModel('en');
+            await downloadModel(languageCode);
           }
         } catch (err) {
           console.warn(err);
@@ -24,7 +26,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       }
     };
     requestPermissions();
-  }, [loadModel, downloadModel]);
+  }, [loadModel, downloadModel, languageCode]);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -33,6 +35,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         <Text style={styles.subtitle}>
           Offline Communication Loop {isModelLoaded ? '(STT Ready)' : isDownloading ? '(Downloading Model...)' : ''}
         </Text>
+        {error ? <Text style={styles.errorText}>Error: {error}</Text> : null}
       </View>
       
       <View style={styles.grid}>
@@ -48,7 +51,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
 
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('Language')}>
           <Text style={styles.cardTitle}>Language</Text>
-          <Text style={styles.cardDesc}>English</Text>
+          <Text style={styles.cardDesc}>{languageName}</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('Settings')}>
@@ -67,13 +70,29 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         </TouchableOpacity>
       </View>
 
-      <View style={styles.sttDisplay}>
-        {isDownloading ? (
-          <View>
-            <Text style={styles.transcript}>Downloading language model...</Text>
-            <Text style={styles.confidence}>{downloadProgress}%</Text>
+      <Modal
+        visible={isDownloading}
+        transparent={true}
+        animationType="fade"
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Downloading {languageName} Model</Text>
+            
+            <View style={styles.progressBarContainer}>
+              <View style={[styles.progressBarFill, { width: `${downloadProgress}%` }]} />
+            </View>
+            <Text style={styles.modalPercent}>{downloadProgress}%</Text>
+
+            <TouchableOpacity style={styles.cancelButton} onPress={cancelDownload}>
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </TouchableOpacity>
           </View>
-        ) : (partial || transcript) ? (
+        </View>
+      </Modal>
+
+      <View style={styles.sttDisplay}>
+        {(partial || transcript) ? (
           <View>
             <Text style={styles.transcript}>{partial || transcript}</Text>
             {!!transcript && <Text style={styles.confidence}>Confidence: {(confidence * 100).toFixed(0)}%</Text>}
@@ -85,7 +104,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       <View style={styles.pttContainer}>
         <TouchableOpacity 
           style={[styles.pttButton, isListening && styles.pttButtonActive]} 
-          onPressIn={() => startListening('en')} 
+          onPressIn={() => startListening(languageCode)} 
           onPressOut={() => stopListening()}>
           <View style={styles.pttInner}>
             <Text style={styles.pttText}>{isListening ? 'LISTENING...' : 'HOLD TO SPEAK'}</Text>
@@ -194,6 +213,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  downloadContainer: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  progressBarContainer: {
+    width: '80%',
+    height: 8,
+    backgroundColor: '#2c2c2e',
+    borderRadius: 4,
+    marginTop: 15,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: '#00e676',
+    borderRadius: 4,
+  },
   transcript: {
     color: '#fff',
     fontSize: 20,
@@ -211,6 +247,59 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     marginTop: 5,
+    fontWeight: 'bold',
+  },
+  errorText: {
+    color: '#ff3b30',
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalContent: {
+    width: '80%',
+    backgroundColor: '#1c1c1e',
+    borderRadius: 16,
+    padding: 25,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#2c2c2e',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  modalPercent: {
+    color: '#00e676',
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginTop: 10,
+  },
+  cancelButton: {
+    marginTop: 25,
+    paddingVertical: 10,
+    paddingHorizontal: 25,
+    backgroundColor: 'rgba(255, 59, 48, 0.2)',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ff3b30',
+  },
+  cancelButtonText: {
+    color: '#ff3b30',
+    fontSize: 16,
     fontWeight: 'bold',
   }
 });

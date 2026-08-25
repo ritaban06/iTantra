@@ -10,6 +10,7 @@ export default {
   unloadModel: () => NativeSTT.unloadModel(),
   isModelLoaded: (language) => NativeSTT.isModelLoaded(language),
   downloadModel: (language) => NativeSTT.downloadModel(language),
+  cancelDownload: () => NativeSTT.cancelDownload(),
   onResult: (cb) => emitter.addListener('STT_RESULT', cb),
   onPartial: (cb) => emitter.addListener('STT_PARTIAL', cb),
   onError: (cb) => emitter.addListener('STT_ERROR', cb),

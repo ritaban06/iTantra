@@ -81,7 +81,13 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     }
 
     @ReactMethod
+    fun cancelDownload() {
+        ModelManager.isDownloadCancelled = true
+    }
+
+    @ReactMethod
     fun downloadModel(language: String, promise: Promise) {
+        ModelManager.isDownloadCancelled = false
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 ModelManager.downloadAndUnzipModel(reactApplicationContext, language) { progress ->

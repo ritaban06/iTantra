@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, FlatList } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useLanguage } from '../state/LanguageContext';
 
 const LANGUAGES = [
   'English', 'Hindi', 'Bengali', 'Gujarati', 'Marathi',
@@ -8,7 +9,7 @@ const LANGUAGES = [
 ];
 
 export default function LanguageScreen() {
-  const [selected, setSelected] = useState('English');
+  const { languageName, setLanguage } = useLanguage();
 
   return (
     <SafeAreaView style={styles.container}>
@@ -20,11 +21,11 @@ export default function LanguageScreen() {
         keyExtractor={item => item}
         renderItem={({ item }: { item: any }) => (
           <TouchableOpacity 
-            style={[styles.langCard, selected === item && styles.selectedCard]}
-            onPress={() => setSelected(item)}
+            style={[styles.langCard, languageName === item && styles.selectedCard]}
+            onPress={() => setLanguage(item)}
           >
-            <Text style={[styles.langText, selected === item && styles.selectedText]}>{item}</Text>
-            {selected === item && <Text style={styles.check}>✓</Text>}
+            <Text style={[styles.langText, languageName === item && styles.selectedText]}>{item}</Text>
+            {languageName === item && <Text style={styles.check}>✓</Text>}
           </TouchableOpacity>
         )}
       />

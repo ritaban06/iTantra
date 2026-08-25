@@ -91,6 +91,12 @@ export const useSTT = () => {
     }
   }, []);
 
+  const cancelDownload = useCallback(() => {
+    NativeSTT.cancelDownload();
+    setIsDownloading(false);
+    setError("Download cancelled by user.");
+  }, []);
+
   return {
     transcript,
     partial,
@@ -103,6 +109,7 @@ export const useSTT = () => {
     downloadProgress,
     loadModel,
     downloadModel,
+    cancelDownload,
     startListening,
     stopListening
   };
