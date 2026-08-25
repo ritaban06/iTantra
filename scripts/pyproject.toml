@@ -1,0 +1,9 @@
+[project]
+name = "itantra-scripts"
+version = "0.1.0"
+description = "Helper scripts for iTantra"
+requires-python = ">=3.11"
+dependencies = [
+    "librosa",
+    "numpy",
+]

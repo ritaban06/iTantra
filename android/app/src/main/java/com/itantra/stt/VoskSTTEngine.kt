@@ -5,7 +5,7 @@ import org.vosk.Recognizer
 import kotlinx.coroutines.*
 import org.json.JSONObject
 
-class VoskSTTEngine(private val modelPath: String) {
+class VoskSTTEngine(private val modelPath: String) : STTEngine {
 
     private var model: Model? = null
     private var recognizer: Recognizer? = null
@@ -13,11 +13,11 @@ class VoskSTTEngine(private val modelPath: String) {
     private val scope = CoroutineScope(Dispatchers.Default)
     private var processingJob: Job? = null
 
-    var onPartialResult: ((String) -> Unit)? = null
-    var onFinalResult: ((STTResult) -> Unit)? = null
-    var onError: ((String) -> Unit)? = null
+    override var onPartialResult: ((String) -> Unit)? = null
+    override var onFinalResult: ((STTResult) -> Unit)? = null
+    override var onError: ((String) -> Unit)? = null
 
-    fun loadModel(): Boolean {
+    override fun loadModel(modelPath: String, vocabPath: String?): Boolean {
         if (isLoaded) return true
         try {
             model = Model(modelPath)
@@ -30,7 +30,7 @@ class VoskSTTEngine(private val modelPath: String) {
         }
     }
 
-    fun startRecognition() {
+    override fun startRecognition() {
         if (!isLoaded) {
             onError?.invoke("Model not loaded yet")
             return
@@ -38,7 +38,7 @@ class VoskSTTEngine(private val modelPath: String) {
         recognizer?.reset()
     }
 
-    fun feedChunk(data: ByteArray) {
+    override fun feedChunk(data: ByteArray) {
         if (!isLoaded || recognizer == null) return
         
         processingJob = scope.launch {
@@ -65,7 +65,7 @@ class VoskSTTEngine(private val modelPath: String) {
         }
     }
 
-    fun getFinalResult() {
+    override fun getFinalResult() {
         if (!isLoaded || recognizer == null) return
         
         scope.launch {
@@ -101,11 +101,11 @@ class VoskSTTEngine(private val modelPath: String) {
         }
     }
 
-    fun reset() {
+    override fun reset() {
         recognizer?.reset()
     }
 
-    fun release() {
+    override fun release() {
         processingJob?.cancel()
         recognizer?.close()
         model?.close()
@@ -115,9 +115,4 @@ class VoskSTTEngine(private val modelPath: String) {
     }
 }
 
-data class STTResult(
-    val transcript: String,
-    val confidence: Float,
-    val language: String,
-    val durationMs: Long
-)
+

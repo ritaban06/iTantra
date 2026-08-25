@@ -13,7 +13,7 @@ import java.nio.ByteOrder
 
 class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
-    private var sttEngine: VoskSTTEngine? = null
+    private var sttEngine: STTEngine? = null
     private var audioManager: AudioCaptureManager? = null
     private val vad = VoiceActivityDetector()
     private var currentLanguage = "en"
@@ -21,21 +21,38 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     override fun getName() = "NativeSTT"
 
     private fun emitEvent(eventName: String, params: WritableMap?) {
-        reactApplicationContext
-            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            .emit(eventName, params)
+        if (reactApplicationContext.hasActiveCatalystInstance()) {
+            reactApplicationContext
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit(eventName, params)
+        }
     }
 
     @ReactMethod
     fun loadModel(language: String, promise: Promise) {
-        val modelPath = ModelManager.getModelPath(reactApplicationContext, language)
-        if (modelPath == null) {
-            promise.reject("MODEL_NOT_FOUND", "Model for language $language not found locally.")
+        val config = ModelManager.getConfig(language)
+        if (config == null) {
+            promise.reject("MODEL_NOT_FOUND", "Language $language not configured.")
             return
         }
 
         sttEngine?.release()
-        sttEngine = VoskSTTEngine(modelPath).apply {
+        
+        sttEngine = when (config.engine) {
+            EngineType.VOSK -> {
+                val voskPath = ModelManager.getVoskModelPath(reactApplicationContext, config.modelPath)
+                if (voskPath == null) {
+                    promise.reject("MODEL_LOAD_FAILED", "Vosk model not found locally.")
+                    return
+                }
+                VoskSTTEngine(voskPath)
+            }
+            EngineType.INDIC_CONFORMER -> {
+                IndicConformerSTTEngine(reactApplicationContext, language)
+            }
+        }
+
+        sttEngine?.apply {
             onPartialResult = { partial ->
                 val map = Arguments.createMap().apply {
                     putString("partial", partial)
@@ -60,11 +77,16 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
             }
         }
 
-        if (sttEngine?.loadModel() == true) {
+        val loaded = when (config.engine) {
+            EngineType.VOSK -> sttEngine?.loadModel(config.modelPath)
+            EngineType.INDIC_CONFORMER -> sttEngine?.loadModel(config.modelPath, config.vocabPath)
+        }
+
+        if (loaded == true) {
             currentLanguage = language
             promise.resolve(true)
         } else {
-            promise.reject("MODEL_LOAD_FAILED", "Failed to initialize Vosk model.")
+            promise.reject("MODEL_LOAD_FAILED", "Failed to initialize STT model.")
         }
     }
 
@@ -87,25 +109,7 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
 
     @ReactMethod
     fun downloadModel(language: String, promise: Promise) {
-        ModelManager.isDownloadCancelled = false
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                ModelManager.downloadAndUnzipModel(reactApplicationContext, language) { progress ->
-                    val map = Arguments.createMap().apply {
-                        putString("language", language)
-                        putInt("progress", progress)
-                    }
-                    emitEvent("STT_DOWNLOAD_PROGRESS", map)
-                }
-                withContext(Dispatchers.Main) {
-                    promise.resolve(true)
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    promise.reject("DOWNLOAD_FAILED", e.message)
-                }
-            }
-        }
+        promise.resolve(true)
     }
 
     @ReactMethod
@@ -121,7 +125,6 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         if (audioManager == null) {
             audioManager = AudioCaptureManager(
                 onChunk = { chunk ->
-                    // Convert ByteArray to ShortArray for VAD
                     val shortArray = ShortArray(chunk.size / 2)
                     ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortArray)
                     
@@ -137,8 +140,6 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
                         }
                     }
 
-                    // For simplicity, we feed everything to STT if we started listening,
-                    // or we could optimize by only feeding during PRE_SPEECH / SPEECH
                     sttEngine?.feedChunk(chunk)
                 },
                 onError = { error ->
@@ -160,4 +161,10 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         sttEngine?.getFinalResult()
         promise.resolve(true)
     }
+
+    @ReactMethod
+    fun addListener(eventName: String?) {}
+
+    @ReactMethod
+    fun removeListeners(count: Int?) {}
 }
