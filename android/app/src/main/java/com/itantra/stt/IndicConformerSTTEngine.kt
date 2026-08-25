@@ -30,11 +30,20 @@ class IndicConformerSTTEngine(private val context: Context, private val language
     override fun loadModel(modelPath: String, vocabPath: String?): Boolean {
         try {
             env = OrtEnvironment.getEnvironment()
-            val modelBytes = context.assets.open(modelPath).use { it.readBytes() }
-            session = env?.createSession(modelBytes, OrtSession.SessionOptions())
+            
+            session = if (modelPath.startsWith("/")) {
+                env?.createSession(modelPath, OrtSession.SessionOptions())
+            } else {
+                val modelBytes = context.assets.open(modelPath).use { it.readBytes() }
+                env?.createSession(modelBytes, OrtSession.SessionOptions())
+            }
 
             if (vocabPath != null) {
-                val jsonStr = context.assets.open(vocabPath).bufferedReader().use { it.readText() }
+                val jsonStr = if (vocabPath.startsWith("/")) {
+                    java.io.File(vocabPath).readText()
+                } else {
+                    context.assets.open(vocabPath).bufferedReader().use { it.readText() }
+                }
                 val array = JSONArray(jsonStr)
                 vocab = List(array.length()) { i -> array.getString(i) }
             }

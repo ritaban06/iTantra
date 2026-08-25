@@ -6,6 +6,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 enum class EngineType { VOSK, INDIC_CONFORMER }
 
@@ -46,11 +48,98 @@ object ModelManager {
     }
 
     fun isModelAvailable(context: Context, language: String): Boolean {
-        return language == "en" || language == "hi" || language == "bn"
+        val config = getConfig(language) ?: return false
+        val externalFilesDir = context.getExternalFilesDir(null)
+        val destFile = File(externalFilesDir, config.modelPath)
+        
+        return destFile.exists() || language == "en"
     }
 
-    fun listAvailableModels(context: Context): List<String> {
-        return languages.keys.filter { isModelAvailable(context, it) }
+    fun getIndicConformerAbsolutePaths(context: Context, language: String): Pair<String?, String?> {
+        val config = getConfig(language) ?: return Pair(null, null)
+        val externalFilesDir = context.getExternalFilesDir(null)
+        
+        val modelFile = File(externalFilesDir, config.modelPath)
+        val vocabFile = config.vocabPath?.let { File(externalFilesDir, it) }
+
+        return if (modelFile.exists()) {
+            Pair(modelFile.absolutePath, vocabFile?.absolutePath)
+        } else {
+            Pair(null, null)
+        }
+    }
+
+    suspend fun downloadModel(context: Context, language: String, onProgress: (Int) -> Unit) {
+        val config = getConfig(language) ?: throw Exception("Language config not found")
+        
+        if (config.engine == EngineType.VOSK) {
+            withContext(Dispatchers.Main) { onProgress(100) }
+            return
+        }
+
+        val modelUrl = "https://huggingface.co/sulabhkatiyar/indicconformer-120m-onnx/resolve/main/$language/model.onnx"
+        val vocabUrl = "https://huggingface.co/sulabhkatiyar/indicconformer-120m-onnx/resolve/main/$language/vocab.json"
+
+        val externalFilesDir = context.getExternalFilesDir(null)
+        val modelFile = File(externalFilesDir, config.modelPath)
+        val vocabFile = config.vocabPath?.let { File(externalFilesDir, it) }
+
+        modelFile.parentFile?.mkdirs()
+
+        if (vocabFile != null && !vocabFile.exists()) {
+            downloadFile(vocabUrl, vocabFile)
+        }
+
+        if (!modelFile.exists()) {
+            downloadFile(modelUrl, modelFile) { progress ->
+                onProgress(progress)
+            }
+        } else {
+            withContext(Dispatchers.Main) { onProgress(100) }
+        }
+    }
+
+    private suspend fun downloadFile(urlString: String, destFile: File, onProgress: ((Int) -> Unit)? = null) {
+        withContext(Dispatchers.IO) {
+            val url = URL(urlString)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.connect()
+
+            val fileLength = connection.contentLength
+            val input = BufferedInputStream(connection.inputStream)
+            val output = FileOutputStream(destFile)
+
+            val buffer = ByteArray(1024 * 64)
+            var totalRead = 0L
+            var count: Int
+            var lastProgress = -1
+
+            while (input.read(buffer).also { count = it } != -1) {
+                if (isDownloadCancelled) {
+                    output.close()
+                    input.close()
+                    connection.disconnect()
+                    destFile.delete()
+                    throw Exception("Download cancelled by user")
+                }
+
+                output.write(buffer, 0, count)
+                totalRead += count
+                if (fileLength > 0 && onProgress != null) {
+                    val progress = ((totalRead * 100) / fileLength).toInt()
+                    if (progress > lastProgress) {
+                        withContext(Dispatchers.Main) {
+                            onProgress(progress)
+                        }
+                        lastProgress = progress
+                    }
+                }
+            }
+            output.flush()
+            output.close()
+            input.close()
+            connection.disconnect()
+        }
     }
 
     fun getVoskModelPath(context: Context, assetPath: String): String? {
@@ -100,9 +189,5 @@ object ModelManager {
             e.printStackTrace()
             false
         }
-    }
-
-    fun downloadAndUnzipModel(context: Context, language: String, onProgress: (Int) -> Unit) {
-        onProgress(100)
     }
 }

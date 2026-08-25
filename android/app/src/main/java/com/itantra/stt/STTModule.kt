@@ -79,7 +79,14 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
 
         val loaded = when (config.engine) {
             EngineType.VOSK -> sttEngine?.loadModel(config.modelPath)
-            EngineType.INDIC_CONFORMER -> sttEngine?.loadModel(config.modelPath, config.vocabPath)
+            EngineType.INDIC_CONFORMER -> {
+                val (absModel, absVocab) = ModelManager.getIndicConformerAbsolutePaths(reactApplicationContext, language)
+                if (absModel != null) {
+                    sttEngine?.loadModel(absModel, absVocab)
+                } else {
+                    sttEngine?.loadModel(config.modelPath, config.vocabPath)
+                }
+            }
         }
 
         if (loaded == true) {
@@ -107,9 +114,32 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         ModelManager.isDownloadCancelled = true
     }
 
+    private val scope = CoroutineScope(Dispatchers.Main)
+
     @ReactMethod
     fun downloadModel(language: String, promise: Promise) {
-        promise.resolve(true)
+        val config = ModelManager.getConfig(language)
+        if (config == null) {
+            promise.reject("MODEL_NOT_FOUND", "Language $language not configured.")
+            return
+        }
+
+        ModelManager.isDownloadCancelled = false
+
+        scope.launch {
+            try {
+                ModelManager.downloadModel(reactApplicationContext, language) { progress ->
+                    val map = Arguments.createMap().apply {
+                        putString("language", language)
+                        putInt("progress", progress)
+                    }
+                    emitEvent("STT_DOWNLOAD_PROGRESS", map)
+                }
+                promise.resolve(true)
+            } catch (e: Exception) {
+                promise.reject("DOWNLOAD_FAILED", e.message)
+            }
+        }
     }
 
     @ReactMethod
