@@ -11,11 +11,11 @@ The Offline Speech-to-Text pipeline using the Vosk Android SDK has been successf
 ### 2. Vosk STT Engine Integration (Native)
 - Added the `com.alphacephei:vosk-android` dependency to `build.gradle`.
 - Created **`VoskSTTEngine.kt`** to manage Vosk models, feed audio chunks asynchronously, and parse partial/final transcript results.
-- Added **`ModelManager.kt`** to resolve local model paths from `getExternalFilesDir()`.
+- Added **`ModelManager.kt`** to resolve local model paths from `getExternalFilesDir()` and automatically download/unzip models from the web using `HttpURLConnection` and `ZipInputStream`.
 
 ### 3. React Native Bridge (Native -> JS)
-- Created **`STTModule.kt`** (ReactMethod) exposing `startListening`, `stopListening`, and `loadModel`.
-- Emits events such as `STT_PARTIAL`, `STT_RESULT`, `SPEECH_START`, and `SPEECH_END`.
+- Created **`STTModule.kt`** (ReactMethod) exposing `startListening`, `stopListening`, `loadModel`, and `downloadModel`.
+- Emits events such as `STT_PARTIAL`, `STT_RESULT`, `STT_DOWNLOAD_PROGRESS`, `SPEECH_START`, and `SPEECH_END`.
 - Registered module via **`STTPackage.kt`** in **`MainApplication.kt`**.
 
 ### 4. React Native UI & State
@@ -32,4 +32,4 @@ The Offline Speech-to-Text pipeline using the Vosk Android SDK has been successf
   ```bash
   npm run android
   ```
-- **Note on Models:** To make STT work, ensure you download/extract the Vosk models to your device's external files directory under `models/stt/en/` (e.g. `vosk-model-small-en-us`). The system will look for it there upon calling `loadModel('en')`.
+- **Auto Downloading:** The app will now automatically attempt to download and unzip the English Vosk model on first launch if it's missing, showing a progress percentage on the home screen.

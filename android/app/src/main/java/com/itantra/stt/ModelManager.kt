@@ -1,9 +1,12 @@
 package com.itantra.stt
 
 import android.content.Context
+import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.zip.ZipInputStream
 
 object ModelManager {
 
@@ -13,18 +16,70 @@ object ModelManager {
         "bn" to "vosk-model-bn-0.2"
     )
 
+    private val languageUrlMapping = mapOf(
+        "en" to "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+        "hi" to "https://alphacephei.com/vosk/models/vosk-model-hi-0.22.zip"
+    )
+
     fun getModelPath(context: Context, language: String): String? {
         val modelFolderName = languageModelMapping[language] ?: return null
         val externalFilesDir = context.getExternalFilesDir(null)
         val destFolder = File(externalFilesDir, "models/stt/$language")
-        
-        // For MVP, we assume models will be either extracted here from assets or downloaded here.
-        // In this implementation, if the folder exists, we return its path.
+        val actualModelDir = File(destFolder, modelFolderName)
+
+        if (actualModelDir.exists() && actualModelDir.isDirectory) {
+            return actualModelDir.absolutePath
+        }
+
         if (destFolder.exists() && destFolder.isDirectory) {
+            // For cases where we just extracted directly without the root folder, or renaming
             return destFolder.absolutePath
+        }
+
+        // Check if we can copy from assets (bundled models)
+        val assetPath = "models/stt/$language/$modelFolderName"
+        try {
+            val assets = context.assets.list(assetPath)
+            if (!assets.isNullOrEmpty()) {
+                if (!actualModelDir.exists()) actualModelDir.mkdirs()
+                if (copyAssetFolder(context, assetPath, actualModelDir.absolutePath)) {
+                    return actualModelDir.absolutePath
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
         
         return null
+    }
+
+    private fun copyAssetFolder(context: Context, srcPath: String, destPath: String): Boolean {
+        return try {
+            val fileList = context.assets.list(srcPath)
+            if (fileList.isNullOrEmpty()) {
+                return false
+            }
+
+            File(destPath).mkdirs()
+            for (file in fileList) {
+                val srcFile = "$srcPath/$file"
+                val destFile = "$destPath/$file"
+                val subFiles = context.assets.list(srcFile)
+                if (subFiles != null && subFiles.isNotEmpty()) {
+                    copyAssetFolder(context, srcFile, destFile)
+                } else {
+                    context.assets.open(srcFile).use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                }
+            }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
     }
 
     fun isModelAvailable(context: Context, language: String): Boolean {
@@ -33,5 +88,53 @@ object ModelManager {
 
     fun listAvailableModels(context: Context): List<String> {
         return languageModelMapping.keys.filter { isModelAvailable(context, it) }
+    }
+
+    fun downloadAndUnzipModel(context: Context, language: String, onProgress: (Int) -> Unit) {
+        val urlStr = languageUrlMapping[language] ?: throw Exception("URL not found for language $language")
+        val externalFilesDir = context.getExternalFilesDir(null) ?: throw Exception("External files dir not found")
+        val destFolder = File(externalFilesDir, "models/stt/$language")
+        
+        if (!destFolder.exists()) {
+            destFolder.mkdirs()
+        }
+
+        val url = URL(urlStr)
+        val connection = url.openConnection() as HttpURLConnection
+        connection.connect()
+
+        val fileLength = connection.contentLength
+        val input = BufferedInputStream(connection.inputStream)
+        
+        val zipInputStream = ZipInputStream(input)
+        var zipEntry = zipInputStream.nextEntry
+        var totalRead = 0L
+
+        while (zipEntry != null) {
+            val newFile = File(destFolder, zipEntry.name)
+            if (zipEntry.isDirectory) {
+                newFile.mkdirs()
+            } else {
+                newFile.parentFile?.mkdirs()
+                val fos = FileOutputStream(newFile)
+                val buffer = ByteArray(4096)
+                var count: Int
+                while (zipInputStream.read(buffer).also { count = it } != -1) {
+                    fos.write(buffer, 0, count)
+                    totalRead += count
+                    if (fileLength > 0) {
+                        val progress = ((totalRead * 100) / fileLength).toInt()
+                        onProgress(progress)
+                    }
+                }
+                fos.close()
+            }
+            zipInputStream.closeEntry()
+            zipEntry = zipInputStream.nextEntry
+        }
+        zipInputStream.close()
+        input.close()
+        connection.disconnect()
+        onProgress(100)
     }
 }

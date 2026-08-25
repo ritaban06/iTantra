@@ -4,28 +4,35 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSTT } from '../hooks/useSTT';
 
 export default function HomeScreen({ navigation }: { navigation: any }) {
-  const { transcript, partial, confidence, isListening, startListening, stopListening, loadModel, isModelLoaded } = useSTT();
+  const { transcript, partial, confidence, isListening, startListening, stopListening, loadModel, isModelLoaded, downloadModel, isDownloading, downloadProgress } = useSTT();
 
   useEffect(() => {
     const requestPermissions = async () => {
       if (Platform.OS === 'android') {
         try {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-          // For MVP, we'll try to load English model right away if permission is granted
-          loadModel('en');
+          // For MVP, try to load English model right away if permission is granted
+          try {
+            await loadModel('en');
+          } catch (e) {
+            // Model not found, start download
+            await downloadModel('en');
+          }
         } catch (err) {
           console.warn(err);
         }
       }
     };
     requestPermissions();
-  }, [loadModel]);
+  }, [loadModel, downloadModel]);
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>iTantra</Text>
-        <Text style={styles.subtitle}>Offline Communication Loop {isModelLoaded ? '(STT Ready)' : ''}</Text>
+        <Text style={styles.subtitle}>
+          Offline Communication Loop {isModelLoaded ? '(STT Ready)' : isDownloading ? '(Downloading Model...)' : ''}
+        </Text>
       </View>
       
       <View style={styles.grid}>
@@ -61,7 +68,12 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       </View>
 
       <View style={styles.sttDisplay}>
-        {(partial || transcript) ? (
+        {isDownloading ? (
+          <View>
+            <Text style={styles.transcript}>Downloading language model...</Text>
+            <Text style={styles.confidence}>{downloadProgress}%</Text>
+          </View>
+        ) : (partial || transcript) ? (
           <View>
             <Text style={styles.transcript}>{partial || transcript}</Text>
             {!!transcript && <Text style={styles.confidence}>Confidence: {(confidence * 100).toFixed(0)}%</Text>}

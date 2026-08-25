@@ -4,6 +4,10 @@ import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.itantra.audio.AudioCaptureManager
 import com.itantra.audio.VoiceActivityDetector
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -74,6 +78,28 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     @ReactMethod
     fun isModelLoaded(language: String, promise: Promise) {
         promise.resolve(sttEngine != null && currentLanguage == language)
+    }
+
+    @ReactMethod
+    fun downloadModel(language: String, promise: Promise) {
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                ModelManager.downloadAndUnzipModel(reactApplicationContext, language) { progress ->
+                    val map = Arguments.createMap().apply {
+                        putString("language", language)
+                        putInt("progress", progress)
+                    }
+                    emitEvent("STT_DOWNLOAD_PROGRESS", map)
+                }
+                withContext(Dispatchers.Main) {
+                    promise.resolve(true)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    promise.reject("DOWNLOAD_FAILED", e.message)
+                }
+            }
+        }
     }
 
     @ReactMethod

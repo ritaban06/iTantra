@@ -9,6 +9,8 @@ export const useSTT = () => {
   const [isModelLoaded, setIsModelLoaded] = useState(false);
   const [error, setError] = useState(null);
   const [isSpeechActive, setIsSpeechActive] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   useEffect(() => {
     const subs = [
@@ -29,6 +31,9 @@ export const useSTT = () => {
       }),
       NativeSTT.onSpeechEnd(() => {
         setIsSpeechActive(false);
+      }),
+      NativeSTT.onDownloadProgress((res) => {
+        setDownloadProgress(res.progress);
       })
     ];
 
@@ -45,8 +50,24 @@ export const useSTT = () => {
     } catch (err) {
       setError(err.message);
       setIsModelLoaded(false);
+      throw err;
     }
   }, []);
+
+  const downloadModel = useCallback(async (language) => {
+    try {
+      setError(null);
+      setIsDownloading(true);
+      setDownloadProgress(0);
+      await NativeSTT.downloadModel(language);
+      setIsDownloading(false);
+      await loadModel(language);
+    } catch (err) {
+      setError(err.message);
+      setIsDownloading(false);
+      throw err;
+    }
+  }, [loadModel]);
 
   const startListening = useCallback(async (language) => {
     try {
@@ -78,7 +99,10 @@ export const useSTT = () => {
     isModelLoaded,
     error,
     isSpeechActive,
+    isDownloading,
+    downloadProgress,
     loadModel,
+    downloadModel,
     startListening,
     stopListening
   };
