@@ -3,6 +3,8 @@ package com.itantra.stt
 import org.vosk.Model
 import org.vosk.Recognizer
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 class VoskSTTEngine(private val modelPath: String) : STTEngine {
@@ -12,6 +14,7 @@ class VoskSTTEngine(private val modelPath: String) : STTEngine {
     private var isLoaded = false
     private val scope = CoroutineScope(Dispatchers.Default)
     private var processingJob: Job? = null
+    private val mutex = Mutex()
 
     override var onPartialResult: ((String) -> Unit)? = null
     override var onFinalResult: ((STTResult) -> Unit)? = null
@@ -35,31 +38,38 @@ class VoskSTTEngine(private val modelPath: String) : STTEngine {
             onError?.invoke("Model not loaded yet")
             return
         }
-        recognizer?.reset()
+        scope.launch {
+            mutex.withLock {
+                recognizer?.reset()
+            }
+        }
     }
 
     override fun feedChunk(data: ByteArray) {
         if (!isLoaded || recognizer == null) return
         
         processingJob = scope.launch {
-            try {
-                val done = recognizer!!.acceptWaveForm(data, data.size)
-                if (done) {
-                    val resultJson = recognizer!!.result
-                    val parsed = parseFinalResult(resultJson)
-                    withContext(Dispatchers.Main) {
-                        if (parsed != null) onFinalResult?.invoke(parsed)
+            mutex.withLock {
+                if (recognizer == null) return@withLock
+                try {
+                    val done = recognizer!!.acceptWaveForm(data, data.size)
+                    if (done) {
+                        val resultJson = recognizer!!.result
+                        val parsed = parseFinalResult(resultJson)
+                        withContext(Dispatchers.Main) {
+                            if (parsed != null) onFinalResult?.invoke(parsed)
+                        }
+                    } else {
+                        val partialJson = recognizer!!.partialResult
+                        val partial = parsePartialResult(partialJson)
+                        withContext(Dispatchers.Main) {
+                            onPartialResult?.invoke(partial)
+                        }
                     }
-                } else {
-                    val partialJson = recognizer!!.partialResult
-                    val partial = parsePartialResult(partialJson)
+                } catch (e: Exception) {
                     withContext(Dispatchers.Main) {
-                        onPartialResult?.invoke(partial)
+                        onError?.invoke("Recognition error: ${e.message}")
                     }
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    onError?.invoke("Recognition error: ${e.message}")
                 }
             }
         }
@@ -69,10 +79,19 @@ class VoskSTTEngine(private val modelPath: String) : STTEngine {
         if (!isLoaded || recognizer == null) return
         
         scope.launch {
-            val finalJson = recognizer!!.finalResult
-            val parsed = parseFinalResult(finalJson)
-            withContext(Dispatchers.Main) {
-                if (parsed != null) onFinalResult?.invoke(parsed)
+            mutex.withLock {
+                if (recognizer == null) return@withLock
+                try {
+                    val finalJson = recognizer!!.finalResult
+                    val parsed = parseFinalResult(finalJson)
+                    withContext(Dispatchers.Main) {
+                        if (parsed != null) onFinalResult?.invoke(parsed)
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        onError?.invoke("Recognition error: ${e.message}")
+                    }
+                }
             }
         }
     }
@@ -102,16 +121,24 @@ class VoskSTTEngine(private val modelPath: String) : STTEngine {
     }
 
     override fun reset() {
-        recognizer?.reset()
+        scope.launch {
+            mutex.withLock {
+                recognizer?.reset()
+            }
+        }
     }
 
     override fun release() {
         processingJob?.cancel()
-        recognizer?.close()
-        model?.close()
-        recognizer = null
-        model = null
-        isLoaded = false
+        scope.launch {
+            mutex.withLock {
+                recognizer?.close()
+                model?.close()
+                recognizer = null
+                model = null
+                isLoaded = false
+            }
+        }
     }
 }
 

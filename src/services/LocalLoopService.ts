@@ -17,4 +17,11 @@ export class LocalLoopService {
     }
     return NativeLocalLoop.stopLoop();
   }
+
+  static async teardown() {
+    if (!NativeLocalLoop) {
+      return;
+    }
+    return NativeLocalLoop.teardown();
+  }
 }

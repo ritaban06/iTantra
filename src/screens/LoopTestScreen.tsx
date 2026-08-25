@@ -29,6 +29,7 @@ export default function LoopTestScreen() {
 
     return () => {
       ModelScheduler.unloadModels();
+      import('../services/LocalLoopService').then(module => module.LocalLoopService.teardown());
     };
   }, [languageCode]);
 
