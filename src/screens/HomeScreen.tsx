@@ -7,6 +7,7 @@ import { useBLE } from '../hooks/useBLE';
 import { useBLEVoiceMode } from '../hooks/useBLEVoiceMode';
 import { useLanguage } from '../state/LanguageContext';
 import { AppState } from '../state/appReducer';
+import { getLanguageDisplayName } from '../semantic';
 
 export default function HomeScreen({ navigation }: { navigation: any }) {
   const { transcript, partial, confidence, loadModel, isModelLoaded, downloadModel, cancelDownload, isDownloading, downloadProgress, error: sttError } = useSTT();
@@ -14,7 +15,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
   const {
     enabled: bleVoiceEnabled,
     status: bleVoiceStatus,
-    lastSentText,
+    lastSentMessage,
     sendStatus,
     lastReceivedMessage,
     voiceError,
@@ -52,7 +53,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       case 'OFF': return 'BLE Voice Mode is off';
       case 'WAITING_FOR_SPEECH': return 'Listening for speech...';
       case 'SENDING': return 'Sending...';
-      case 'SENT': return `Sent: "${lastSentText}"`;
+      case 'SENT': return lastSentMessage ? `Sent: "${lastSentMessage.text}"` : 'Sent';
       case 'RECEIVING': return 'Receiving...';
       case 'SPEAKING': return 'Speaking received message...';
       case 'ERROR': return voiceError || 'Error occurred';
@@ -100,13 +101,45 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
           <Text style={styles.bleStatusText}>{voiceStatusText()}</Text>
         )}
 
-        {/* Last received message */}
+        {/* Last sent message with semantic metadata */}
+        {bleVoiceEnabled && lastSentMessage && sendStatus !== 'idle' && (
+          <View style={styles.sentBox}>
+            <Text style={styles.sentText}>"{lastSentMessage.text}"</Text>
+            <View style={styles.metadataRow}>
+              <Text style={styles.metadataLabel}>Language: </Text>
+              <Text style={styles.metadataValue}>{getLanguageDisplayName(lastSentMessage.language)}</Text>
+              <Text style={styles.metadataSeparator}> · </Text>
+              <Text style={styles.metadataLabel}>Emotion: </Text>
+              <Text style={styles.metadataValue}>{lastSentMessage.emotion.charAt(0).toUpperCase() + lastSentMessage.emotion.slice(1)}</Text>
+            </View>
+            <Text style={[styles.sendStatus, sendStatus === 'sent' ? styles.sendStatusOk : styles.sendStatusFail]}>
+              {sendStatus === 'sent' ? 'Sent ✓' : sendStatus === 'failed' ? 'Failed ✗' : 'Sending...'}
+            </Text>
+          </View>
+        )}
+
+        {/* Last received message with semantic metadata */}
         {lastReceivedMessage && (
           <View style={styles.receivedBox}>
             <Text style={styles.receivedLabel}>
               Received from {lastReceivedMessage.fromDevice}:
             </Text>
             <Text style={styles.receivedText}>"{lastReceivedMessage.text}"</Text>
+            <View style={styles.metadataRow}>
+              <Text style={styles.metadataLabel}>Language: </Text>
+              <Text style={styles.metadataValue}>{lastReceivedMessage.languageDisplay}</Text>
+              <Text style={styles.metadataSeparator}> · </Text>
+              <Text style={styles.metadataLabel}>Emotion: </Text>
+              <Text style={styles.metadataValue}>{lastReceivedMessage.emotionDisplay}</Text>
+              <Text style={styles.metadataSeparator}> · </Text>
+              <Text style={styles.metadataLabel}>Confidence: </Text>
+              <Text style={styles.metadataValue}>{lastReceivedMessage.emotionConfidencePct}%</Text>
+            </View>
+            <Text style={styles.metadataLabel}>Voice: <Text style={styles.metadataValue}>{lastReceivedMessage.voiceProfileDisplay}</Text></Text>
+            <Text style={styles.receivedStatus}>
+              {lastReceivedMessage.status === 'speaking' ? 'Speaking...' :
+               lastReceivedMessage.status === 'spoken' ? 'Spoken ✓' : 'Received'}
+            </Text>
           </View>
         )}
       </View>
@@ -224,12 +257,25 @@ const styles = StyleSheet.create({
   bleToggleText: { color: '#8e8e93', fontWeight: 'bold', fontSize: 13 },
   bleToggleTextOn: { color: '#000' },
   bleStatusText: { color: '#8e8e93', fontSize: 13, marginTop: 8 },
+  sentBox: {
+    marginTop: 8, backgroundColor: '#1c1c2e', padding: 10, borderRadius: 8,
+    borderWidth: 1, borderColor: '#4a6fa5',
+  },
+  sentText: { color: '#fff', fontSize: 15, fontWeight: '600', fontStyle: 'italic' },
+  sendStatus: { fontSize: 12, fontWeight: 'bold', marginTop: 4 },
+  sendStatusOk: { color: '#00e676' },
+  sendStatusFail: { color: '#ff3b30' },
   receivedBox: {
     marginTop: 8, backgroundColor: '#0a2e1a', padding: 10, borderRadius: 8,
     borderWidth: 1, borderColor: '#00e676',
   },
   receivedLabel: { color: '#8e8e93', fontSize: 12, marginBottom: 2 },
   receivedText: { color: '#00e676', fontSize: 15, fontWeight: '600' },
+  receivedStatus: { color: '#00e676', fontSize: 12, fontWeight: 'bold', marginTop: 4 },
+  metadataRow: { flexDirection: 'row', flexWrap: 'wrap', marginTop: 4 },
+  metadataLabel: { color: '#8e8e93', fontSize: 11 },
+  metadataValue: { color: '#aaa', fontSize: 11, fontWeight: '600' },
+  metadataSeparator: { color: '#48484a', fontSize: 11 },
 
   // ── Grid ────────────────────────────────────────────────────────
   grid: { flexDirection: 'row', flexWrap: 'wrap', padding: 10, justifyContent: 'space-between' },
@@ -248,8 +294,8 @@ const styles = StyleSheet.create({
   pttButton: {
     width: 140, height: 140, borderRadius: 70, backgroundColor: '#00e676',
     justifyContent: 'center', alignItems: 'center',
-    shadowColor: '#00e676', shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6, shadowRadius: 20, elevation: 10,
+    shadowColor: '#00e676', shadowOffset: { width: 0, height: 0 }, shadowOpacity: 0.6,
+    shadowRadius: 20, elevation: 10,
   },
   pttInner: {
     width: 120, height: 120, borderRadius: 60, borderWidth: 2,
