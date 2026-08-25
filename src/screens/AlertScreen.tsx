@@ -1,8 +1,23 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTTS } from '../hooks/useTTS';
 
 export default function AlertScreen({ navigation }: { navigation: any }) {
+  const { speak, stop } = useTTS();
+
+  useEffect(() => {
+    speak("Flood water entering shelter three. Evacuate immediately.", "en", true);
+    return () => {
+      stop();
+    };
+  }, []);
+
+  const handleAck = () => {
+    stop();
+    navigation.goBack();
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.content}>
@@ -17,7 +32,7 @@ export default function AlertScreen({ navigation }: { navigation: any }) {
       </View>
       
       <View style={styles.actions}>
-        <TouchableOpacity style={styles.ackBtn} onPress={() => navigation.goBack()}>
+        <TouchableOpacity style={styles.ackBtn} onPress={handleAck}>
           <Text style={styles.ackText}>ACKNOWLEDGE</Text>
         </TouchableOpacity>
       </View>

@@ -1,6 +1,7 @@
 import React from 'react';
-import { View, Text, StyleSheet, FlatList } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useTTS } from '../hooks/useTTS';
 
 const MOCK_MESSAGES = [
   { id: '1', text: 'Hello, are you there?', type: 'NORMAL', sender: 'ITN-B291', isMe: false, time: '10:42 AM' },
@@ -9,19 +10,24 @@ const MOCK_MESSAGES = [
 ];
 
 export default function ChatScreen() {
+  const { speak } = useTTS();
+
   const renderItem = ({ item }: { item: any }) => {
     const isAlert = item.type === 'ALERT';
     
     return (
-      <View style={[
-        styles.messageBubble, 
-        item.isMe ? styles.myMessage : styles.theirMessage,
-        isAlert && styles.alertMessage
-      ]}>
+      <TouchableOpacity 
+        style={[
+          styles.messageBubble, 
+          item.isMe ? styles.myMessage : styles.theirMessage,
+          isAlert && styles.alertMessage
+        ]}
+        onPress={() => speak(item.text, 'en', isAlert)}
+      >
         {!item.isMe && <Text style={styles.sender}>{item.sender}</Text>}
         <Text style={[styles.messageText, isAlert && styles.alertText]}>{item.text}</Text>
         <Text style={styles.time}>{item.time}</Text>
-      </View>
+      </TouchableOpacity>
     );
   };
 
