@@ -6,6 +6,7 @@ import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.pow
 
 class AudioPreprocessor(context: Context) {
     private val filters: Array<FloatArray>
@@ -80,7 +81,7 @@ class AudioPreprocessor(context: Context) {
 
         val mel = applyMelFilterbank(powerSpectrogram, filters)
         
-        val epsilon = kotlin.math.pow(2.0, -24.0).toFloat()
+        val epsilon = (2.0).pow(-24.0).toFloat()
         for (m in 0 until 80) {
             for (t in 0 until framesCount) {
                 mel[m][t] = kotlin.math.ln(mel[m][t] + epsilon)
