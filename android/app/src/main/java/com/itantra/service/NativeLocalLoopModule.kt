@@ -36,6 +36,7 @@ class NativeLocalLoopModule(reactContext: ReactApplicationContext) : ReactContex
     @ReactMethod
     fun stopLoop(promise: Promise) {
         val sttModule = STTModule.instance
+        sttModule?.onFinalResultIntercept = null
         sttModule?.stopListening(promise)
     }
 

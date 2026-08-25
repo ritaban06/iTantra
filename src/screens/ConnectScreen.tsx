@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,11 +6,10 @@ import {
   TouchableOpacity,
   FlatList,
   ActivityIndicator,
-  TextInput,
   ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useBLE, DiscoveredDevice, ConnectionState } from '../hooks/useBLE';
+import { useBLE, DiscoveredDevice } from '../hooks/useBLE';
 
 export default function ConnectScreen() {
   const {
@@ -24,7 +23,6 @@ export default function ConnectScreen() {
     connectedDeviceId,
     mtu,
     lastReceivedData,
-    receivedHistory,
     connectionError,
     startScanning,
     stopScanning,
@@ -33,17 +31,12 @@ export default function ConnectScreen() {
     refreshBluetoothState,
     connect,
     disconnect,
-    send,
   } = useBLE();
 
-  const [helloText, setHelloText] = useState('HELLO');
-
-  // Refresh BT state on mount.
   useEffect(() => {
     refreshBluetoothState();
   }, []);
 
-  // Auto-start advertising so this device is visible to others.
   useEffect(() => {
     if (bluetoothEnabled && !isAdvertising) {
       startAdvertising();
@@ -55,11 +48,8 @@ export default function ConnectScreen() {
   );
 
   const handleScanToggle = () => {
-    if (isScanning) {
-      stopScanning();
-    } else {
-      startScanning();
-    }
+    if (isScanning) stopScanning();
+    else startScanning();
   };
 
   const handleConnect = (deviceId: string) => {
@@ -67,12 +57,6 @@ export default function ConnectScreen() {
       disconnect();
     } else if (connectionState === 'IDLE') {
       connect(deviceId);
-    }
-  };
-
-  const handleSend = () => {
-    if (helloText.trim()) {
-      send(helloText.trim());
     }
   };
 
@@ -122,6 +106,18 @@ export default function ConnectScreen() {
           )}
         </View>
 
+        {/* Connection diagnostics */}
+        {connectionState === 'CONNECTED' && (
+          <View style={styles.connectionBox}>
+            <Text style={styles.connectionTitle}>Connection Active</Text>
+            <Text style={styles.connectionDetail}>Device: {connectedDeviceId}</Text>
+            <Text style={styles.connectionDetail}>MTU: {mtu} bytes</Text>
+            {lastReceivedData && (
+              <Text style={styles.connectionDetail}>Last received: {lastReceivedData}</Text>
+            )}
+          </View>
+        )}
+
         {/* BT disabled warning */}
         {!bluetoothEnabled && (
           <View style={styles.warningBox}>
@@ -129,14 +125,12 @@ export default function ConnectScreen() {
           </View>
         )}
 
-        {/* Error display */}
         {error && (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>{error}</Text>
           </View>
         )}
 
-        {/* Connection error */}
         {connectionError && (
           <View style={styles.errorBox}>
             <Text style={styles.errorText}>{connectionError}</Text>
@@ -174,55 +168,12 @@ export default function ConnectScreen() {
                 {connectionState === 'CONNECTING' && connectedDeviceId === item.deviceId ? (
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
-                  <Text style={styles.connectBtnText}>
-                    {getConnectionLabel(item.deviceId)}
-                  </Text>
+                  <Text style={styles.connectBtnText}>{getConnectionLabel(item.deviceId)}</Text>
                 )}
               </TouchableOpacity>
             </View>
           )}
         />
-
-        {/* ── Temporary HELLO test UI ──────────────────────────────── */}
-        {connectionState === 'CONNECTED' && (
-          <View style={styles.testSection}>
-            <Text style={styles.testSectionTitle}>HELLO Test (Development Only)</Text>
-            <Text style={styles.testConnected}>
-              Connected to {connectedDeviceId} • MTU: {mtu}
-            </Text>
-
-            <View style={styles.sendRow}>
-              <TextInput
-                style={styles.sendInput}
-                value={helloText}
-                onChangeText={setHelloText}
-                placeholder="Type message..."
-                placeholderTextColor="#48484a"
-              />
-              <TouchableOpacity style={styles.sendBtn} onPress={handleSend}>
-                <Text style={styles.sendBtnText}>SEND</Text>
-              </TouchableOpacity>
-            </View>
-
-            {lastReceivedData && (
-              <View style={styles.receivedBox}>
-                <Text style={styles.receivedLabel}>Last received:</Text>
-                <Text style={styles.receivedText}>{lastReceivedData}</Text>
-              </View>
-            )}
-
-            {receivedHistory.length > 0 && (
-              <View style={styles.historyBox}>
-                <Text style={styles.receivedLabel}>History:</Text>
-                {receivedHistory.map((item, idx) => (
-                  <Text key={idx} style={styles.historyItem}>
-                    {item.data}
-                  </Text>
-                ))}
-              </View>
-            )}
-          </View>
-        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -231,23 +182,12 @@ export default function ConnectScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#0a0a0c' },
   scrollContent: { padding: 15 },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   statusText: { color: '#00e676', fontSize: 16, fontWeight: '600' },
   deviceIdText: { color: '#8e8e93', fontSize: 12, marginTop: 2 },
   scanBtn: {
-    backgroundColor: '#1c1c1e',
-    paddingVertical: 10,
-    paddingHorizontal: 18,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#2c2c2e',
-    minWidth: 70,
-    alignItems: 'center',
+    backgroundColor: '#1c1c1e', paddingVertical: 10, paddingHorizontal: 18,
+    borderRadius: 8, borderWidth: 1, borderColor: '#2c2c2e', minWidth: 70, alignItems: 'center',
   },
   scanBtnActive: { borderColor: '#00e676' },
   scanBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
@@ -257,6 +197,12 @@ const styles = StyleSheet.create({
   dotOrange: { color: '#ff9500' },
   dotGray: { color: '#48484a' },
   statusLabel: { color: '#8e8e93', fontSize: 12, marginRight: 12 },
+  connectionBox: {
+    backgroundColor: '#0a2e1a', padding: 12, borderRadius: 8,
+    marginBottom: 12, borderWidth: 1, borderColor: '#00e676',
+  },
+  connectionTitle: { color: '#00e676', fontSize: 14, fontWeight: 'bold', marginBottom: 4 },
+  connectionDetail: { color: '#8e8e93', fontSize: 12, marginBottom: 2 },
   warningBox: {
     backgroundColor: '#3a2a00', padding: 12, borderRadius: 8,
     marginBottom: 12, borderWidth: 1, borderColor: '#ff9500',
@@ -285,27 +231,4 @@ const styles = StyleSheet.create({
   connectBtnActive: { backgroundColor: '#ff3b30', borderColor: '#ff3b30' },
   connectBtnPending: { borderColor: '#ff9500' },
   connectBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
-
-  // ── Test section ────────────────────────────────────────────────────
-  testSection: {
-    marginTop: 20, backgroundColor: '#1c1c1e', padding: 16, borderRadius: 12,
-    borderWidth: 1, borderColor: '#ff9500',
-  },
-  testSectionTitle: { color: '#ff9500', fontSize: 14, fontWeight: 'bold', marginBottom: 8 },
-  testConnected: { color: '#8e8e93', fontSize: 12, marginBottom: 12 },
-  sendRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  sendInput: {
-    flex: 1, backgroundColor: '#2c2c2e', color: '#fff', padding: 10,
-    borderRadius: 8, borderWidth: 1, borderColor: '#48484a', fontSize: 14,
-  },
-  sendBtn: {
-    backgroundColor: '#00e676', paddingVertical: 10, paddingHorizontal: 20,
-    borderRadius: 8, justifyContent: 'center',
-  },
-  sendBtnText: { color: '#000', fontWeight: 'bold', fontSize: 14 },
-  receivedBox: { marginBottom: 10 },
-  receivedLabel: { color: '#8e8e93', fontSize: 12, marginBottom: 4 },
-  receivedText: { color: '#00e676', fontSize: 16, fontWeight: '600' },
-  historyBox: { marginTop: 8 },
-  historyItem: { color: '#8e8e93', fontSize: 13, marginBottom: 4 },
 });

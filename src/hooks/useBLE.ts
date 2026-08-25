@@ -146,10 +146,10 @@ export function useBLE() {
     return () => {
       subsRef.current.forEach((s) => s.remove());
       subsRef.current = [];
-      // Stop native scanning/advertising/disconnect on unmount.
+      // Stop native scanning/advertising on unmount.
+      // Do NOT disconnect GATT — the explicit user action (ConnectScreen) owns that.
       NativeBLE.stopScanning().catch(() => {});
       NativeBLE.stopAdvertising().catch(() => {});
-      NativeBLE.disconnect().catch(() => {});
     };
   }, []);
 

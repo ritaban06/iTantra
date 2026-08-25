@@ -3,26 +3,39 @@ import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform,
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSTT } from '../hooks/useSTT';
 import { usePTT } from '../hooks/usePTT';
+import { useBLE } from '../hooks/useBLE';
+import { useBLEVoiceMode } from '../hooks/useBLEVoiceMode';
 import { useLanguage } from '../state/LanguageContext';
 import { AppState } from '../state/appReducer';
 
 export default function HomeScreen({ navigation }: { navigation: any }) {
   const { transcript, partial, confidence, loadModel, isModelLoaded, downloadModel, cancelDownload, isDownloading, downloadProgress, error: sttError } = useSTT();
-  const { appState, error: pttError, pressIn, pressOut } = usePTT();
+  const { connectionState, connectedDeviceId } = useBLE();
+  const {
+    enabled: bleVoiceEnabled,
+    status: bleVoiceStatus,
+    lastSentText,
+    sendStatus,
+    lastReceivedMessage,
+    voiceError,
+    toggleVoiceMode,
+    clearError,
+  } = useBLEVoiceMode();
   const { languageName, languageCode } = useLanguage();
 
-  const error = sttError || pttError;
+  // Pass bleVoiceEnabled to usePTT: when ON, PTT uses direct NativeSTT (no local TTS).
+  const { appState, error: pttError, pressIn, pressOut } = usePTT(bleVoiceEnabled);
+
+  const error = sttError || pttError || voiceError;
 
   useEffect(() => {
     const requestPermissions = async () => {
       if (Platform.OS === 'android') {
         try {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
-          // Try to load model for selected language right away if permission is granted
           try {
             await loadModel(languageCode);
           } catch (e) {
-            // Model not found, start download
             await downloadModel(languageCode);
           }
         } catch (err) {
@@ -33,6 +46,20 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
     requestPermissions();
   }, [loadModel, downloadModel, languageCode]);
 
+  const isConnected = connectionState === 'CONNECTED';
+  const voiceStatusText = () => {
+    switch (bleVoiceStatus) {
+      case 'OFF': return 'BLE Voice Mode is off';
+      case 'WAITING_FOR_SPEECH': return 'Listening for speech...';
+      case 'SENDING': return 'Sending...';
+      case 'SENT': return `Sent: "${lastSentText}"`;
+      case 'RECEIVING': return 'Receiving...';
+      case 'SPEAKING': return 'Speaking received message...';
+      case 'ERROR': return voiceError || 'Error occurred';
+      default: return '';
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -40,9 +67,51 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         <Text style={styles.subtitle}>
           Offline Communication Loop {isModelLoaded ? '(STT Ready)' : isDownloading ? '(Downloading Model...)' : ''}
         </Text>
-        {error ? <Text style={styles.errorText}>Error: {error}</Text> : null}
+        {error ? (
+          <TouchableOpacity onPress={clearError}>
+            <Text style={styles.errorText}>Error: {error}</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
-      
+
+      {/* ── BLE Voice Mode Section ──────────────────────────────── */}
+      <View style={styles.bleVoiceSection}>
+        <View style={styles.bleVoiceRow}>
+          <View style={styles.bleVoiceLabel}>
+            <Text style={styles.bleVoiceTitle}>BLE Voice Mode</Text>
+            {isConnected ? (
+              <Text style={styles.bleConnected}>Connected to {connectedDeviceId}</Text>
+            ) : (
+              <Text style={styles.bleDisconnected}>Not connected</Text>
+            )}
+          </View>
+          <TouchableOpacity
+            style={[styles.bleToggle, bleVoiceEnabled && styles.bleToggleOn]}
+            onPress={toggleVoiceMode}
+          >
+            <Text style={[styles.bleToggleText, bleVoiceEnabled && styles.bleToggleTextOn]}>
+              {bleVoiceEnabled ? 'ON' : 'OFF'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Voice mode status */}
+        {bleVoiceEnabled && (
+          <Text style={styles.bleStatusText}>{voiceStatusText()}</Text>
+        )}
+
+        {/* Last received message */}
+        {lastReceivedMessage && (
+          <View style={styles.receivedBox}>
+            <Text style={styles.receivedLabel}>
+              Received from {lastReceivedMessage.fromDevice}:
+            </Text>
+            <Text style={styles.receivedText}>"{lastReceivedMessage.text}"</Text>
+          </View>
+        )}
+      </View>
+
+      {/* ── Navigation Grid ─────────────────────────────────────── */}
       <View style={styles.grid}>
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('Chat')}>
           <Text style={styles.cardTitle}>Messages</Text>
@@ -63,12 +132,12 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
           <Text style={styles.cardTitle}>Settings</Text>
           <Text style={styles.cardDesc}>Profile & preferences</Text>
         </TouchableOpacity>
-        
+
         <TouchableOpacity style={[styles.card, styles.alertCard]} onPress={() => navigation.navigate('Alert')}>
           <Text style={styles.cardTitle}>Emergency</Text>
           <Text style={styles.cardDesc}>Trigger Alert</Text>
         </TouchableOpacity>
-        
+
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('Benchmark')}>
           <Text style={styles.cardTitle}>Performance</Text>
           <Text style={styles.cardDesc}>Metrics & Dashboard</Text>
@@ -80,20 +149,15 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         </TouchableOpacity>
       </View>
 
-      <Modal
-        visible={isDownloading}
-        transparent={true}
-        animationType="fade"
-      >
+      {/* ── Download Modal ──────────────────────────────────────── */}
+      <Modal visible={isDownloading} transparent={true} animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Downloading {languageName} Model</Text>
-            
             <View style={styles.progressBarContainer}>
               <View style={[styles.progressBarFill, { width: `${downloadProgress}%` }]} />
             </View>
             <Text style={styles.modalPercent}>{downloadProgress}%</Text>
-
             <TouchableOpacity style={styles.cancelButton} onPress={cancelDownload}>
               <Text style={styles.cancelButtonText}>Cancel</Text>
             </TouchableOpacity>
@@ -101,6 +165,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         </View>
       </Modal>
 
+      {/* ── STT Transcript Display ──────────────────────────────── */}
       <View style={styles.sttDisplay}>
         {(partial || transcript) ? (
           <View>
@@ -111,16 +176,17 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         ) : null}
       </View>
 
+      {/* ── PTT Button ──────────────────────────────────────────── */}
       <View style={styles.pttContainer}>
-        <TouchableOpacity 
-          style={[styles.pttButton, appState === AppState.LISTENING && styles.pttButtonActive]} 
-          onPressIn={() => pressIn(languageCode)} 
+        <TouchableOpacity
+          style={[styles.pttButton, appState === AppState.LISTENING && styles.pttButtonActive]}
+          onPressIn={() => pressIn(languageCode)}
           onPressOut={() => pressOut()}
           disabled={appState === AppState.PROCESSING_STT || appState === AppState.PLAYING_TTS}
         >
           <View style={styles.pttInner}>
             <Text style={styles.pttText}>
-              {appState === AppState.LISTENING ? 'LISTENING...' : 
+              {appState === AppState.LISTENING ? 'LISTENING...' :
                appState === AppState.PROCESSING_STT ? 'PROCESSING' :
                appState === AppState.PLAYING_TTS ? 'PLAYING' : 'HOLD TO SPEAK'}
             </Text>
@@ -132,190 +198,82 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0a0a0c',
+  container: { flex: 1, backgroundColor: '#0a0a0c' },
+  header: { padding: 20, marginTop: 20 },
+  title: { fontSize: 34, fontWeight: '900', color: '#00e676', letterSpacing: 1 },
+  subtitle: { fontSize: 16, color: '#8e8e93', marginTop: 4 },
+  errorText: { color: '#ff3b30', marginTop: 10, fontSize: 14, fontWeight: 'bold' },
+
+  // ── BLE Voice Mode ──────────────────────────────────────────────
+  bleVoiceSection: {
+    marginHorizontal: 10, marginBottom: 10, backgroundColor: '#1c1c1e',
+    padding: 14, borderRadius: 12, borderWidth: 1, borderColor: '#2c2c2e',
   },
-  header: {
-    padding: 20,
-    marginTop: 20,
+  bleVoiceRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
   },
-  title: {
-    fontSize: 34,
-    fontWeight: '900',
-    color: '#00e676',
-    letterSpacing: 1,
+  bleVoiceLabel: { flex: 1 },
+  bleVoiceTitle: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  bleConnected: { color: '#00e676', fontSize: 12, marginTop: 2 },
+  bleDisconnected: { color: '#8e8e93', fontSize: 12, marginTop: 2 },
+  bleToggle: {
+    backgroundColor: '#2c2c2e', paddingVertical: 6, paddingHorizontal: 16,
+    borderRadius: 16, borderWidth: 1, borderColor: '#48484a',
   },
-  subtitle: {
-    fontSize: 16,
-    color: '#8e8e93',
-    marginTop: 4,
+  bleToggleOn: { backgroundColor: '#00e676', borderColor: '#00e676' },
+  bleToggleText: { color: '#8e8e93', fontWeight: 'bold', fontSize: 13 },
+  bleToggleTextOn: { color: '#000' },
+  bleStatusText: { color: '#8e8e93', fontSize: 13, marginTop: 8 },
+  receivedBox: {
+    marginTop: 8, backgroundColor: '#0a2e1a', padding: 10, borderRadius: 8,
+    borderWidth: 1, borderColor: '#00e676',
   },
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    padding: 10,
-    justifyContent: 'space-between',
-  },
+  receivedLabel: { color: '#8e8e93', fontSize: 12, marginBottom: 2 },
+  receivedText: { color: '#00e676', fontSize: 15, fontWeight: '600' },
+
+  // ── Grid ────────────────────────────────────────────────────────
+  grid: { flexDirection: 'row', flexWrap: 'wrap', padding: 10, justifyContent: 'space-between' },
   card: {
-    width: '47%',
-    backgroundColor: '#1c1c1e',
-    padding: 20,
-    borderRadius: 16,
-    marginBottom: 15,
-    borderWidth: 1,
-    borderColor: '#2c2c2e',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
-    elevation: 5,
+    width: '47%', backgroundColor: '#1c1c1e', padding: 20, borderRadius: 16,
+    marginBottom: 15, borderWidth: 1, borderColor: '#2c2c2e',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3,
+    shadowRadius: 5, elevation: 5,
   },
-  alertCard: {
-    borderColor: '#ff3b30',
-    backgroundColor: '#2c0b0a',
-  },
-  cardTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 8,
-  },
-  cardDesc: {
-    color: '#8e8e93',
-    fontSize: 13,
-  },
-  pttContainer: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    paddingBottom: 40,
-  },
+  alertCard: { borderColor: '#ff3b30', backgroundColor: '#2c0b0a' },
+  cardTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 },
+  cardDesc: { color: '#8e8e93', fontSize: 13 },
+
+  // ── PTT ─────────────────────────────────────────────────────────
+  pttContainer: { flex: 1, justifyContent: 'flex-end', alignItems: 'center', paddingBottom: 40 },
   pttButton: {
-    width: 140,
-    height: 140,
-    borderRadius: 70,
-    backgroundColor: '#00e676',
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#00e676',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.6,
-    shadowRadius: 20,
-    elevation: 10,
+    width: 140, height: 140, borderRadius: 70, backgroundColor: '#00e676',
+    justifyContent: 'center', alignItems: 'center',
+    shadowColor: '#00e676', shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.6, shadowRadius: 20, elevation: 10,
   },
   pttInner: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 2,
-    borderColor: 'rgba(255,255,255,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    width: 120, height: 120, borderRadius: 60, borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.5)', justifyContent: 'center', alignItems: 'center',
   },
-  pttText: {
-    color: '#000',
-    fontWeight: 'bold',
-    fontSize: 14,
-    textAlign: 'center',
-  },
-  pttButtonActive: {
-    backgroundColor: '#ff3b30',
-    shadowColor: '#ff3b30',
-  },
-  sttDisplay: {
-    padding: 20,
-    minHeight: 100,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  downloadContainer: {
-    width: '100%',
-    alignItems: 'center',
-  },
-  progressBarContainer: {
-    width: '80%',
-    height: 8,
-    backgroundColor: '#2c2c2e',
-    borderRadius: 4,
-    marginTop: 15,
-    overflow: 'hidden',
-  },
-  progressBarFill: {
-    height: '100%',
-    backgroundColor: '#00e676',
-    borderRadius: 4,
-  },
-  transcript: {
-    color: '#fff',
-    fontSize: 20,
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-  confidence: {
-    color: '#8e8e93',
-    fontSize: 12,
-    textAlign: 'center',
-    marginTop: 5,
-  },
-  warningText: {
-    color: '#ffcc00',
-    fontSize: 14,
-    textAlign: 'center',
-    marginTop: 5,
-    fontWeight: 'bold',
-  },
-  errorText: {
-    color: '#ff3b30',
-    marginTop: 10,
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  pttText: { color: '#000', fontWeight: 'bold', fontSize: 14, textAlign: 'center' },
+  pttButtonActive: { backgroundColor: '#ff3b30', shadowColor: '#ff3b30' },
+
+  // ── STT Display ─────────────────────────────────────────────────
+  sttDisplay: { padding: 20, minHeight: 80, justifyContent: 'center', alignItems: 'center' },
+  transcript: { color: '#fff', fontSize: 20, textAlign: 'center', fontStyle: 'italic' },
+  confidence: { color: '#8e8e93', fontSize: 12, textAlign: 'center', marginTop: 5 },
+  warningText: { color: '#ffcc00', fontSize: 14, textAlign: 'center', marginTop: 5, fontWeight: 'bold' },
+
+  // ── Modal ───────────────────────────────────────────────────────
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0, 0, 0, 0.7)', justifyContent: 'center', alignItems: 'center' },
   modalContent: {
-    width: '80%',
-    backgroundColor: '#1c1c1e',
-    borderRadius: 16,
-    padding: 25,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#2c2c2e',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.5,
-    shadowRadius: 10,
-    elevation: 10,
+    width: '80%', backgroundColor: '#1c1c1e', borderRadius: 16, padding: 25,
+    alignItems: 'center', borderWidth: 1, borderColor: '#2c2c2e',
   },
-  modalTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 20,
-    textAlign: 'center',
-  },
-  modalPercent: {
-    color: '#00e676',
-    fontSize: 16,
-    fontWeight: 'bold',
-    marginTop: 10,
-  },
-  cancelButton: {
-    marginTop: 25,
-    paddingVertical: 10,
-    paddingHorizontal: 25,
-    backgroundColor: 'rgba(255, 59, 48, 0.2)',
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#ff3b30',
-  },
-  cancelButtonText: {
-    color: '#ff3b30',
-    fontSize: 16,
-    fontWeight: 'bold',
-  }
+  modalTitle: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 20, textAlign: 'center' },
+  progressBarContainer: { width: '80%', height: 8, backgroundColor: '#2c2c2e', borderRadius: 4, marginTop: 15, overflow: 'hidden' },
+  progressBarFill: { height: '100%', backgroundColor: '#00e676', borderRadius: 4 },
+  modalPercent: { color: '#00e676', fontSize: 16, fontWeight: 'bold', marginTop: 10 },
+  cancelButton: { marginTop: 25, paddingVertical: 10, paddingHorizontal: 25, backgroundColor: 'rgba(255, 59, 48, 0.2)', borderRadius: 8, borderWidth: 1, borderColor: '#ff3b30' },
+  cancelButtonText: { color: '#ff3b30', fontSize: 16, fontWeight: 'bold' },
 });
