@@ -1,13 +1,14 @@
 import React from 'react';
 import { View, StyleSheet, StatusBar } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import AppNavigator from './src/navigation/AppNavigator';
 
 function App(): React.JSX.Element {
   return (
-    <View style={styles.container}>
+    <SafeAreaProvider style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#1c1c1e" />
       <AppNavigator />
-    </View>
+    </SafeAreaProvider>
   );
 }
 

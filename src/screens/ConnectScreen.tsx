@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, FlatList } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const MOCK_DEVICES = [
   { id: 'ITN-B291', signal: -45, status: 'Connected' },
@@ -20,7 +21,7 @@ export default function ConnectScreen() {
       <FlatList
         data={MOCK_DEVICES}
         keyExtractor={item => item.id}
-        renderItem={({ item }) => (
+        renderItem={({ item }: { item: any }) => (
           <TouchableOpacity style={styles.deviceCard}>
             <View>
               <Text style={styles.deviceName}>{item.id}</Text>

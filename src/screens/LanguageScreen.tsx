@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, SafeAreaView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, FlatList } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const LANGUAGES = [
   'English', 'Hindi', 'Bengali', 'Gujarati', 'Marathi',
@@ -17,7 +18,7 @@ export default function LanguageScreen() {
       <FlatList
         data={LANGUAGES}
         keyExtractor={item => item}
-        renderItem={({ item }) => (
+        renderItem={({ item }: { item: any }) => (
           <TouchableOpacity 
             style={[styles.langCard, selected === item && styles.selectedCard]}
             onPress={() => setSelected(item)}

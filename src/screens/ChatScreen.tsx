@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, FlatList, SafeAreaView } from 'react-native';
+import { View, Text, StyleSheet, FlatList } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 const MOCK_MESSAGES = [
   { id: '1', text: 'Hello, are you there?', type: 'NORMAL', sender: 'ITN-B291', isMe: false, time: '10:42 AM' },
@@ -8,7 +9,7 @@ const MOCK_MESSAGES = [
 ];
 
 export default function ChatScreen() {
-  const renderItem = ({ item }) => {
+  const renderItem = ({ item }: { item: any }) => {
     const isAlert = item.type === 'ALERT';
     
     return (
