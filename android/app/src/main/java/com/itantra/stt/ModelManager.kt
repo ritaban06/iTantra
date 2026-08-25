@@ -24,7 +24,7 @@ object ModelManager {
         "en" to LanguageConfig(
             code = "en",
             engine = EngineType.VOSK,
-            modelPath = "models/vosk/en",
+            modelPath = "models/stt/en/vosk-model-small-en-us",
             vocabPath = null
         ),
         "bn" to LanguageConfig(

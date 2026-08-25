@@ -20,7 +20,7 @@ class VoskSTTEngine(private val modelPath: String) : STTEngine {
     override fun loadModel(modelPath: String, vocabPath: String?): Boolean {
         if (isLoaded) return true
         try {
-            model = Model(modelPath)
+            model = Model(this.modelPath)
             recognizer = Recognizer(model, 16000.0f)
             isLoaded = true
             return true
