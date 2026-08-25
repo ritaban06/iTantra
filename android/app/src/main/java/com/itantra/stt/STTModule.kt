@@ -123,6 +123,38 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     }
 
     @ReactMethod
+    fun isModelDownloaded(language: String, promise: Promise) {
+        val available = ModelManager.isModelAvailable(reactApplicationContext, language)
+        promise.resolve(available)
+    }
+
+    @ReactMethod
+    fun deleteModel(language: String, promise: Promise) {
+        try {
+            if (language == "en") {
+                promise.resolve(false)
+                return
+            }
+            val config = ModelManager.getConfig(language)
+            if (config != null) {
+                val externalFilesDir = reactApplicationContext.getExternalFilesDir(null)
+                val modelFile = java.io.File(externalFilesDir, config.modelPath)
+                if (modelFile.exists()) modelFile.delete()
+                
+                if (config.vocabPath != null) {
+                    val vocabFile = java.io.File(externalFilesDir, config.vocabPath)
+                    if (vocabFile.exists()) vocabFile.delete()
+                }
+                promise.resolve(true)
+            } else {
+                promise.resolve(false)
+            }
+        } catch (e: Exception) {
+            promise.reject("DELETE_FAILED", e.message)
+        }
+    }
+
+    @ReactMethod
     fun cancelDownload() {
         ModelManager.isDownloadCancelled = true
     }
