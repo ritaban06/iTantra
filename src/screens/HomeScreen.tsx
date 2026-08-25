@@ -1,13 +1,31 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import React, { useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useSTT } from '../hooks/useSTT';
 
 export default function HomeScreen({ navigation }: { navigation: any }) {
+  const { transcript, partial, confidence, isListening, startListening, stopListening, loadModel, isModelLoaded } = useSTT();
+
+  useEffect(() => {
+    const requestPermissions = async () => {
+      if (Platform.OS === 'android') {
+        try {
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
+          // For MVP, we'll try to load English model right away if permission is granted
+          loadModel('en');
+        } catch (err) {
+          console.warn(err);
+        }
+      }
+    };
+    requestPermissions();
+  }, [loadModel]);
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>iTantra</Text>
-        <Text style={styles.subtitle}>Offline Communication Loop</Text>
+        <Text style={styles.subtitle}>Offline Communication Loop {isModelLoaded ? '(STT Ready)' : ''}</Text>
       </View>
       
       <View style={styles.grid}>
@@ -42,11 +60,23 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         </TouchableOpacity>
       </View>
 
+      <View style={styles.sttDisplay}>
+        {(partial || transcript) ? (
+          <View>
+            <Text style={styles.transcript}>{partial || transcript}</Text>
+            {!!transcript && <Text style={styles.confidence}>Confidence: {(confidence * 100).toFixed(0)}%</Text>}
+            {!!transcript && confidence < 0.6 && <Text style={styles.warningText}>Speech unclear. Please repeat.</Text>}
+          </View>
+        ) : null}
+      </View>
+
       <View style={styles.pttContainer}>
-        {/* Placeholder for PTT Button */}
-        <TouchableOpacity style={styles.pttButton} onLongPress={() => console.log('PTT')} onPressOut={() => console.log('PTT release')}>
+        <TouchableOpacity 
+          style={[styles.pttButton, isListening && styles.pttButtonActive]} 
+          onPressIn={() => startListening('en')} 
+          onPressOut={() => stopListening()}>
           <View style={styles.pttInner}>
-            <Text style={styles.pttText}>HOLD TO SPEAK</Text>
+            <Text style={styles.pttText}>{isListening ? 'LISTENING...' : 'HOLD TO SPEAK'}</Text>
           </View>
         </TouchableOpacity>
       </View>
@@ -141,5 +171,34 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontSize: 14,
     textAlign: 'center',
+  },
+  pttButtonActive: {
+    backgroundColor: '#ff3b30',
+    shadowColor: '#ff3b30',
+  },
+  sttDisplay: {
+    padding: 20,
+    minHeight: 100,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  transcript: {
+    color: '#fff',
+    fontSize: 20,
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  confidence: {
+    color: '#8e8e93',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 5,
+  },
+  warningText: {
+    color: '#ffcc00',
+    fontSize: 14,
+    textAlign: 'center',
+    marginTop: 5,
+    fontWeight: 'bold',
   }
 });
