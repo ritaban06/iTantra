@@ -2,11 +2,16 @@ import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useSTT } from '../hooks/useSTT';
+import { usePTT } from '../hooks/usePTT';
 import { useLanguage } from '../state/LanguageContext';
+import { AppState } from '../state/appReducer';
 
 export default function HomeScreen({ navigation }: { navigation: any }) {
-  const { transcript, partial, confidence, isListening, startListening, stopListening, loadModel, isModelLoaded, downloadModel, cancelDownload, isDownloading, downloadProgress, error } = useSTT();
+  const { transcript, partial, confidence, loadModel, isModelLoaded, downloadModel, cancelDownload, isDownloading, downloadProgress, error: sttError } = useSTT();
+  const { appState, error: pttError, pressIn, pressOut } = usePTT();
   const { languageName, languageCode } = useLanguage();
+
+  const error = sttError || pttError;
 
   useEffect(() => {
     const requestPermissions = async () => {
@@ -68,6 +73,11 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
           <Text style={styles.cardTitle}>Performance</Text>
           <Text style={styles.cardDesc}>Metrics & Dashboard</Text>
         </TouchableOpacity>
+
+        <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('LoopTest')}>
+          <Text style={styles.cardTitle}>Local Loop</Text>
+          <Text style={styles.cardDesc}>Test Speech Loop</Text>
+        </TouchableOpacity>
       </View>
 
       <Modal
@@ -103,11 +113,17 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
 
       <View style={styles.pttContainer}>
         <TouchableOpacity 
-          style={[styles.pttButton, isListening && styles.pttButtonActive]} 
-          onPressIn={() => startListening(languageCode)} 
-          onPressOut={() => stopListening()}>
+          style={[styles.pttButton, appState === AppState.LISTENING && styles.pttButtonActive]} 
+          onPressIn={() => pressIn(languageCode)} 
+          onPressOut={() => pressOut()}
+          disabled={appState === AppState.PROCESSING_STT || appState === AppState.PLAYING_TTS}
+        >
           <View style={styles.pttInner}>
-            <Text style={styles.pttText}>{isListening ? 'LISTENING...' : 'HOLD TO SPEAK'}</Text>
+            <Text style={styles.pttText}>
+              {appState === AppState.LISTENING ? 'LISTENING...' : 
+               appState === AppState.PROCESSING_STT ? 'PROCESSING' :
+               appState === AppState.PLAYING_TTS ? 'PLAYING' : 'HOLD TO SPEAK'}
+            </Text>
           </View>
         </TouchableOpacity>
       </View>

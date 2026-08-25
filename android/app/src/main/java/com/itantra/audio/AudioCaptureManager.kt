@@ -14,12 +14,21 @@ class AudioCaptureManager(
 ) {
     private var audioRecord: AudioRecord? = null
     private var isRecording = false
+    private var isMuted = false
     private var captureJob: Job? = null
     
     private val SAMPLE_RATE = 16000
     private val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
     private val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     private val BUFFER_SIZE = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT) * 2
+
+    fun mute() {
+        isMuted = true
+    }
+
+    fun unmute() {
+        isMuted = false
+    }
 
     @SuppressLint("MissingPermission")
     fun startCapture() {
@@ -47,9 +56,11 @@ class AudioCaptureManager(
                 while (isRecording && isActive) {
                     val readResult = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                     if (readResult > 0) {
-                        val chunk = buffer.copyOf(readResult)
-                        withContext(Dispatchers.Default) {
-                            onChunk(chunk)
+                        if (!isMuted) {
+                            val chunk = buffer.copyOf(readResult)
+                            withContext(Dispatchers.Default) {
+                                onChunk(chunk)
+                            }
                         }
                     } else if (readResult < 0) {
                         withContext(Dispatchers.Main) {

@@ -5,6 +5,14 @@ import com.facebook.react.modules.core.DeviceEventManagerModule
 import kotlinx.coroutines.*
 
 class TTSModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
+
+    companion object {
+        var instance: TTSModule? = null
+    }
+
+    init {
+        instance = this
+    }
     private val modelManager = TTSModelManager(reactContext)
     private val scope = CoroutineScope(Dispatchers.Default + Job())
 
@@ -20,8 +28,7 @@ class TTSModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         }
     }
 
-    @ReactMethod
-    fun speak(text: String, language: String, isAlert: Boolean, promise: Promise) {
+    fun speakNative(text: String, language: String, onStart: () -> Unit, onFinish: () -> Unit) {
         val engine = modelManager.getEngine(language)
         
         val startParams = Arguments.createMap().apply {
@@ -29,6 +36,7 @@ class TTSModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
             putString("language", language)
         }
         sendEvent("TTS_STARTED", startParams)
+        onStart()
 
         scope.launch {
             val startMs = System.currentTimeMillis()
@@ -41,8 +49,13 @@ class TTSModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
                 putDouble("durationMs", durationMs.toDouble())
             }
             sendEvent("TTS_FINISHED", finishParams)
-            promise.resolve(null)
+            onFinish()
         }
+    }
+
+    @ReactMethod
+    fun speak(text: String, language: String, isAlert: Boolean, promise: Promise) {
+        speakNative(text, language, onStart = {}, onFinish = { promise.resolve(null) })
     }
 
     @ReactMethod

@@ -13,12 +13,24 @@ import java.nio.ByteOrder
 
 class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
 
+    companion object {
+        var instance: STTModule? = null
+    }
+
+    init {
+        instance = this
+    }
+
     private var sttEngine: STTEngine? = null
     private var audioManager: AudioCaptureManager? = null
     private val vad = VoiceActivityDetector()
     private var currentLanguage = "en"
     
+    var onFinalResultIntercept: ((String, Double, String) -> Unit)? = null
+    
     override fun getName() = "NativeSTT"
+
+    fun getAudioManager(): AudioCaptureManager? = audioManager
 
     private fun emitEvent(eventName: String, params: WritableMap?) {
         if (reactApplicationContext.hasActiveCatalystInstance()) {
@@ -68,6 +80,7 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
                     putDouble("durationMs", result.durationMs.toDouble())
                 }
                 emitEvent("STT_RESULT", map)
+                onFinalResultIntercept?.invoke(result.transcript, result.confidence.toDouble(), language)
             }
             onError = { error ->
                 val map = Arguments.createMap().apply {

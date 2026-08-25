@@ -10,6 +10,7 @@ import LanguageScreen from '../screens/LanguageScreen';
 import AlertScreen from '../screens/AlertScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import BenchmarkScreen from '../screens/BenchmarkScreen';
+import LoopTestScreen from '../screens/LoopTestScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -73,6 +74,11 @@ export default function AppNavigator() {
           name="Benchmark" 
           component={BenchmarkScreen} 
           options={{ title: 'Performance Dashboard' }}
+        />
+        <Stack.Screen 
+          name="LoopTest" 
+          component={LoopTestScreen} 
+          options={{ title: 'Local Loop' }}
         />
       </Stack.Navigator>
     </NavigationContainer>

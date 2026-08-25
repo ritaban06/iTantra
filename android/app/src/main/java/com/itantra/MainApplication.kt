@@ -18,6 +18,7 @@ class MainApplication : Application(), ReactApplication {
           // add(MyReactNativePackage())
           add(com.itantra.stt.STTPackage())
           add(com.itantra.tts.TTSPackage())
+          add(com.itantra.service.LocalLoopPackage())
         },
     )
   }
