@@ -67,6 +67,10 @@ class BLEAdvertiser(private val context: Context) {
 
         val data = AdvertiseData.Builder()
             .addServiceUuid(ParcelUuid(BLEConstants.SERVICE_UUID))
+            .setIncludeDeviceName(false)
+            .build()
+            
+        val scanResponse = AdvertiseData.Builder()
             .addManufacturerData(BLEConstants.MANUFACTURER_ID, deviceIdBytes)
             .setIncludeDeviceName(false)
             .build()
@@ -92,7 +96,7 @@ class BLEAdvertiser(private val context: Context) {
         }
 
         try {
-            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
         } catch (e: SecurityException) {
             return "BLUETOOTH_PERMISSION_DENIED"
         } catch (e: Exception) {

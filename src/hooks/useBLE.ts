@@ -163,12 +163,13 @@ export function useBLE() {
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_ADVERTISE,
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+        PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
       ]);
       const allGranted = Object.values(result).every(
         (v) => v === PermissionsAndroid.RESULTS.GRANTED,
       );
       if (!allGranted) {
-        setError('Bluetooth permissions denied');
+        setError('Bluetooth/Location permissions denied');
         return false;
       }
       return true;
