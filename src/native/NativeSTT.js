@@ -17,4 +17,6 @@ export default {
   onSpeechStart: (cb) => emitter.addListener('SPEECH_START', cb),
   onSpeechEnd: (cb) => emitter.addListener('SPEECH_END', cb),
   onDownloadProgress: (cb) => emitter.addListener('STT_DOWNLOAD_PROGRESS', cb),
+  muteMic: () => NativeSTT.muteMic(),
+  unmuteMic: () => NativeSTT.unmuteMic(),
 };

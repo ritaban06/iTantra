@@ -237,6 +237,23 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         promise.resolve(true)
     }
 
+    /**
+     * Mute the microphone input. AudioRecord continues reading but chunks are discarded.
+     * Used for echo prevention when TTS is playing received BLE text.
+     */
+    @ReactMethod
+    fun muteMic() {
+        audioManager?.mute()
+    }
+
+    /**
+     * Unmute the microphone input after TTS playback finishes.
+     */
+    @ReactMethod
+    fun unmuteMic() {
+        audioManager?.unmute()
+    }
+
     @ReactMethod
     fun addListener(eventName: String?) {}
 

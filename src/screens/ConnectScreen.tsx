@@ -1,54 +1,234 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList } from 'react-native';
+import React, { useEffect } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  FlatList,
+  ActivityIndicator,
+  ScrollView,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-
-const MOCK_DEVICES = [
-  { id: 'ITN-B291', signal: -45, status: 'Connected' },
-  { id: 'ITN-C903', signal: -70, status: 'Available' },
-  { id: 'ITN-D771', signal: -88, status: 'Available' },
-];
+import { useBLE, DiscoveredDevice } from '../hooks/useBLE';
 
 export default function ConnectScreen() {
+  const {
+    bluetoothEnabled,
+    isScanning,
+    isAdvertising,
+    discoveredDevices,
+    error,
+    localDeviceId,
+    connectionState,
+    connectedDeviceId,
+    mtu,
+    lastReceivedData,
+    connectionError,
+    startScanning,
+    stopScanning,
+    startAdvertising,
+    stopAdvertising,
+    refreshBluetoothState,
+    connect,
+    disconnect,
+  } = useBLE();
+
+  useEffect(() => {
+    refreshBluetoothState();
+  }, []);
+
+  useEffect(() => {
+    if (bluetoothEnabled && !isAdvertising) {
+      startAdvertising();
+    }
+  }, [bluetoothEnabled]);
+
+  const deviceArray: DiscoveredDevice[] = Array.from(discoveredDevices.values()).sort(
+    (a, b) => b.rssi - a.rssi,
+  );
+
+  const handleScanToggle = () => {
+    if (isScanning) stopScanning();
+    else startScanning();
+  };
+
+  const handleConnect = (deviceId: string) => {
+    if (connectionState === 'CONNECTED' && connectedDeviceId === deviceId) {
+      disconnect();
+    } else if (connectionState === 'IDLE') {
+      connect(deviceId);
+    }
+  };
+
+  const getConnectionLabel = (deviceId: string): string => {
+    if (connectionState === 'CONNECTING' && connectedDeviceId === deviceId) return 'CONNECTING...';
+    if (connectionState === 'CONNECTED' && connectedDeviceId === deviceId) return 'DISCONNECT';
+    return 'CONNECT';
+  };
+
+  const isConnectedTo = (deviceId: string): boolean =>
+    connectionState === 'CONNECTED' && connectedDeviceId === deviceId;
+
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.statusText}>Scanning for iTantra nodes...</Text>
-        <TouchableOpacity style={styles.scanBtn}>
-          <Text style={styles.scanBtnText}>RESCAN</Text>
-        </TouchableOpacity>
-      </View>
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        {/* Header */}
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.statusText}>
+              {isScanning ? 'Scanning for iTantra nodes...' : 'Discovery paused'}
+            </Text>
+            <Text style={styles.deviceIdText}>This device: {localDeviceId}</Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.scanBtn, isScanning && styles.scanBtnActive]}
+            onPress={handleScanToggle}
+          >
+            {isScanning ? (
+              <ActivityIndicator size="small" color="#00e676" />
+            ) : (
+              <Text style={styles.scanBtnText}>SCAN</Text>
+            )}
+          </TouchableOpacity>
+        </View>
 
-      <FlatList
-        data={MOCK_DEVICES}
-        keyExtractor={item => item.id}
-        renderItem={({ item }: { item: any }) => (
-          <TouchableOpacity style={styles.deviceCard}>
-            <View>
-              <Text style={styles.deviceName}>{item.id}</Text>
-              <Text style={[styles.deviceStatus, item.status === 'Connected' && styles.connected]}>
-                {item.status}
+        {/* Status indicators */}
+        <View style={styles.statusBar}>
+          <Text style={[styles.statusDot, isAdvertising ? styles.dotGreen : styles.dotGray]}>●</Text>
+          <Text style={styles.statusLabel}>Advertising: {isAdvertising ? 'ON' : 'OFF'}</Text>
+          <Text style={[styles.statusDot, isScanning ? styles.dotGreen : styles.dotGray]}>●</Text>
+          <Text style={styles.statusLabel}>Scanning: {isScanning ? 'ON' : 'OFF'}</Text>
+          {connectionState !== 'IDLE' && (
+            <>
+              <Text style={[styles.statusDot, connectionState === 'CONNECTED' ? styles.dotGreen : styles.dotOrange]}>●</Text>
+              <Text style={styles.statusLabel}>Connection: {connectionState}</Text>
+            </>
+          )}
+        </View>
+
+        {/* Connection diagnostics */}
+        {connectionState === 'CONNECTED' && (
+          <View style={styles.connectionBox}>
+            <Text style={styles.connectionTitle}>Connection Active</Text>
+            <Text style={styles.connectionDetail}>Device: {connectedDeviceId}</Text>
+            <Text style={styles.connectionDetail}>MTU: {mtu} bytes</Text>
+            {lastReceivedData && (
+              <Text style={styles.connectionDetail}>Last received: {lastReceivedData}</Text>
+            )}
+          </View>
+        )}
+
+        {/* BT disabled warning */}
+        {!bluetoothEnabled && (
+          <View style={styles.warningBox}>
+            <Text style={styles.warningText}>Bluetooth is disabled. Enable it in system settings.</Text>
+          </View>
+        )}
+
+        {error && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        {connectionError && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>{connectionError}</Text>
+          </View>
+        )}
+
+        {/* Device list */}
+        <FlatList
+          data={deviceArray}
+          keyExtractor={(item) => item.deviceId}
+          scrollEnabled={false}
+          ListEmptyComponent={
+            <View style={styles.emptyBox}>
+              <Text style={styles.emptyText}>
+                {isScanning ? 'Scanning...' : 'Tap SCAN to discover nearby devices'}
               </Text>
             </View>
-            <View style={styles.signalBox}>
-              <Text style={styles.signal}>{item.signal} dBm</Text>
+          }
+          renderItem={({ item }: { item: DiscoveredDevice }) => (
+            <View style={styles.deviceCard}>
+              <View style={styles.deviceInfo}>
+                <Text style={styles.deviceName}>{item.deviceId}</Text>
+                {item.name ? <Text style={styles.deviceSubtitle}>{item.name}</Text> : null}
+                <Text style={styles.deviceRssi}>{item.rssi} dBm</Text>
+              </View>
+              <TouchableOpacity
+                style={[
+                  styles.connectBtn,
+                  isConnectedTo(item.deviceId) && styles.connectBtnActive,
+                  connectionState === 'CONNECTING' && styles.connectBtnPending,
+                ]}
+                onPress={() => handleConnect(item.deviceId)}
+                disabled={connectionState === 'CONNECTING'}
+              >
+                {connectionState === 'CONNECTING' && connectedDeviceId === item.deviceId ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <Text style={styles.connectBtnText}>{getConnectionLabel(item.deviceId)}</Text>
+                )}
+              </TouchableOpacity>
             </View>
-          </TouchableOpacity>
-        )}
-      />
+          )}
+        />
+      </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0c', padding: 15 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  statusText: { color: '#00e676', fontSize: 16 },
-  scanBtn: { backgroundColor: '#1c1c1e', padding: 10, borderRadius: 8, borderWidth: 1, borderColor: '#2c2c2e' },
-  scanBtnText: { color: '#fff', fontWeight: 'bold' },
-  deviceCard: { backgroundColor: '#1c1c1e', padding: 20, borderRadius: 12, marginBottom: 12, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#2c2c2e' },
+  container: { flex: 1, backgroundColor: '#0a0a0c' },
+  scrollContent: { padding: 15 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  statusText: { color: '#00e676', fontSize: 16, fontWeight: '600' },
+  deviceIdText: { color: '#8e8e93', fontSize: 12, marginTop: 2 },
+  scanBtn: {
+    backgroundColor: '#1c1c1e', paddingVertical: 10, paddingHorizontal: 18,
+    borderRadius: 8, borderWidth: 1, borderColor: '#2c2c2e', minWidth: 70, alignItems: 'center',
+  },
+  scanBtnActive: { borderColor: '#00e676' },
+  scanBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  statusBar: { flexDirection: 'row', alignItems: 'center', marginBottom: 15, gap: 6 },
+  statusDot: { fontSize: 10 },
+  dotGreen: { color: '#00e676' },
+  dotOrange: { color: '#ff9500' },
+  dotGray: { color: '#48484a' },
+  statusLabel: { color: '#8e8e93', fontSize: 12, marginRight: 12 },
+  connectionBox: {
+    backgroundColor: '#0a2e1a', padding: 12, borderRadius: 8,
+    marginBottom: 12, borderWidth: 1, borderColor: '#00e676',
+  },
+  connectionTitle: { color: '#00e676', fontSize: 14, fontWeight: 'bold', marginBottom: 4 },
+  connectionDetail: { color: '#8e8e93', fontSize: 12, marginBottom: 2 },
+  warningBox: {
+    backgroundColor: '#3a2a00', padding: 12, borderRadius: 8,
+    marginBottom: 12, borderWidth: 1, borderColor: '#ff9500',
+  },
+  warningText: { color: '#ff9500', fontSize: 13, fontWeight: '600' },
+  errorBox: {
+    backgroundColor: '#2c0b0a', padding: 12, borderRadius: 8,
+    marginBottom: 12, borderWidth: 1, borderColor: '#ff3b30',
+  },
+  errorText: { color: '#ff3b30', fontSize: 13, fontWeight: '600' },
+  emptyBox: { paddingVertical: 40, alignItems: 'center' },
+  emptyText: { color: '#8e8e93', fontSize: 15 },
+  deviceCard: {
+    backgroundColor: '#1c1c1e', padding: 16, borderRadius: 12, marginBottom: 12,
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    borderWidth: 1, borderColor: '#2c2c2e',
+  },
+  deviceInfo: { flex: 1 },
   deviceName: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  deviceStatus: { color: '#8e8e93', marginTop: 4 },
-  connected: { color: '#00e676' },
-  signalBox: { backgroundColor: '#2c2c2e', padding: 8, borderRadius: 6 },
-  signal: { color: '#00e676', fontWeight: 'bold' }
+  deviceSubtitle: { color: '#8e8e93', fontSize: 13, marginTop: 2 },
+  deviceRssi: { color: '#00e676', fontSize: 12, marginTop: 4 },
+  connectBtn: {
+    backgroundColor: '#2c2c2e', paddingVertical: 8, paddingHorizontal: 16,
+    borderRadius: 8, borderWidth: 1, borderColor: '#48484a', minWidth: 100, alignItems: 'center',
+  },
+  connectBtnActive: { backgroundColor: '#ff3b30', borderColor: '#ff3b30' },
+  connectBtnPending: { borderColor: '#ff9500' },
+  connectBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 13 },
 });

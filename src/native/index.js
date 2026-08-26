@@ -10,11 +10,5 @@ export const NativeTTS = {
   stop: async () => console.log('MOCK NativeTTS.stop'),
 };
 
-export const NativeBLE = {
-  startScanning: async () => console.log('MOCK NativeBLE.startScanning'),
-  stopScanning: async () => console.log('MOCK NativeBLE.stopScanning'),
-  startAdvertising: async () => console.log('MOCK NativeBLE.startAdvertising'),
-  connect: async (deviceId) => console.log('MOCK NativeBLE.connect', deviceId),
-  disconnect: async () => console.log('MOCK NativeBLE.disconnect'),
-  send: async (data) => console.log('MOCK NativeBLE.send', data),
-};
+// NativeBLE is implemented in src/native/NativeBLE.ts
+// Import from there: import NativeBLE from '../native/NativeBLE';
