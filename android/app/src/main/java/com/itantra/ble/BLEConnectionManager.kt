@@ -64,6 +64,10 @@ class BLEConnectionManager(private val context: Context) {
                 listener?.onDeviceFound(deviceId, name, rssi)
             }
 
+            override fun onDeviceDiscovered(deviceId: String, device: BluetoothDevice) {
+                deviceMap[deviceId] = device
+            }
+
             override fun onScanError(code: String, message: String) {
                 listener?.onScanError(code, message)
             }

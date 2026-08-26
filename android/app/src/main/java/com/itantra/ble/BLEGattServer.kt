@@ -170,6 +170,8 @@ class BLEGattServer(private val context: Context) {
             requestId: Int,
             characteristic: android.bluetooth.BluetoothGattCharacteristic,
             preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
             value: ByteArray?
         ) {
             if (characteristic.uuid == BLEConstants.TX_CHAR_UUID && value != null) {
@@ -185,6 +187,8 @@ class BLEGattServer(private val context: Context) {
             requestId: Int,
             descriptor: android.bluetooth.BluetoothGattDescriptor,
             preparedWrite: Boolean,
+            responseNeeded: Boolean,
+            offset: Int,
             value: ByteArray?
         ) {
             // Allow CCCD writes (notification enable/disable).
