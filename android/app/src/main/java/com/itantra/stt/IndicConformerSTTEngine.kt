@@ -70,12 +70,22 @@ class IndicConformerSTTEngine(private val context: Context, private val language
 
     override fun getFinalResult() {
         isListening = false
-        if (audioBuffer.isEmpty() || session == null) return
+        if (audioBuffer.isEmpty() || session == null) {
+            CoroutineScope(Dispatchers.Main).launch {
+                onFinalResult?.invoke(STTResult("", 0.0f, language, 0))
+            }
+            return
+        }
 
         CoroutineScope(Dispatchers.Default).launch {
             try {
                 val mel = audioPreprocessor.processAudio(audioBuffer.toShortArray())
-                if (mel.isEmpty() || mel[0].isEmpty()) return@launch
+                if (mel.isEmpty() || mel[0].isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        onFinalResult?.invoke(STTResult("", 0.0f, language, 0))
+                    }
+                    return@launch
+                }
 
                 val timeFrames = mel[0].size
                 val flattened = FloatArray(80 * timeFrames)

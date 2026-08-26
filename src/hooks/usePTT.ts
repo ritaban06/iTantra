@@ -32,12 +32,31 @@ export function usePTT(useDirectSTT: boolean = false) {
 
     const subs = [
       ttsEmitter.addListener('TTS_STARTED', () => {
+        console.log('[usePTT] Received TTS_STARTED');
         dispatch({ type: 'TTS_STARTED' });
       }),
       ttsEmitter.addListener('TTS_FINISHED', () => {
+        console.log('[usePTT] Received TTS_FINISHED');
         dispatch({ type: 'TTS_FINISHED' });
       }),
+      sttEmitter.addListener('STT_RESULT', (evt) => {
+        console.log('[usePTT] Received STT_RESULT:', evt);
+        // If in Local Loop Mode and the confidence is low/empty, NativeLocalLoop will ignore it.
+        // We must manually reset the state so it doesn't get stuck.
+        if (!useDirectSTTRef.current) {
+          if (!evt.transcript || evt.confidence <= 0.6) {
+            console.log('[usePTT] Local Loop: Empty or low confidence result. Resetting to IDLE.');
+            dispatch({ type: 'TTS_FINISHED' }); // Use TTS_FINISHED to reset to IDLE
+          }
+        } else {
+          // If in BLE Voice Mode, STT_RESULT is the end of the local processing line.
+          // TTS won't play locally for our own voice, so we reset to IDLE.
+          console.log('[usePTT] BLE Voice Mode: Processing complete. Resetting to IDLE.');
+          dispatch({ type: 'TTS_FINISHED' });
+        }
+      }),
       sttEmitter.addListener('STT_ERROR', (evt) => {
+        console.error('[usePTT] Received STT_ERROR:', evt);
         dispatch({ type: 'ERROR', error: evt.message });
       }),
     ];
@@ -46,6 +65,7 @@ export function usePTT(useDirectSTT: boolean = false) {
   }, []);
 
   const pressIn = useCallback(async (languageCode: string) => {
+    console.log(`[usePTT] PTT pressed (lang=${languageCode}, useDirect=${useDirectSTTRef.current})`);
     pttStartTimestamp.current = Date.now();
     dispatch({ type: 'START_LISTENING' });
     try {
@@ -62,6 +82,7 @@ export function usePTT(useDirectSTT: boolean = false) {
   }, []);
 
   const pressOut = useCallback(async () => {
+    console.log('[usePTT] PTT released');
     dispatch({ type: 'STOP_LISTENING' });
     try {
       if (useDirectSTTRef.current) {

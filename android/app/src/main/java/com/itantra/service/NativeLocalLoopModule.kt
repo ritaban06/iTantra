@@ -19,7 +19,7 @@ class NativeLocalLoopModule(reactContext: ReactApplicationContext) : ReactContex
         }
 
         sttModule.onFinalResultIntercept = { transcript, confidence, lang ->
-            if (confidence > 0.6) {
+            if (transcript.isNotBlank() && confidence > 0.6) {
                 sttModule.getAudioManager()?.mute()
                 ttsModule.speakNative(transcript, lang,
                     onStart = {},
@@ -36,7 +36,6 @@ class NativeLocalLoopModule(reactContext: ReactApplicationContext) : ReactContex
     @ReactMethod
     fun stopLoop(promise: Promise) {
         val sttModule = STTModule.instance
-        sttModule?.onFinalResultIntercept = null
         sttModule?.stopListening(promise)
     }
 
