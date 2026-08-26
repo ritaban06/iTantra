@@ -77,10 +77,17 @@ class BLEConnectionManager(private val context: Context) {
         gattServer.listener = object : BLEGattServer.Listener {
             override fun onClientConnected(device: BluetoothDevice) {
                 Log.d(TAG, "GATT server: client connected ${device.address}")
+                val fromDeviceId = findDeviceIdByAddress(device.address) ?: device.address
+                connectedDeviceId = fromDeviceId
+                connectionState = ConnectionState.CONNECTED
+                listener?.onConnectionStateChange(ConnectionState.CONNECTED, fromDeviceId, mtu)
             }
 
             override fun onClientDisconnected(device: BluetoothDevice) {
                 Log.d(TAG, "GATT server: client disconnected ${device.address}")
+                connectedDeviceId = null
+                connectionState = ConnectionState.IDLE
+                listener?.onConnectionStateChange(ConnectionState.IDLE, null, mtu)
             }
 
             override fun onDataReceived(data: ByteArray, device: BluetoothDevice) {
@@ -167,7 +174,19 @@ class BLEConnectionManager(private val context: Context) {
 
     /** Send data to the connected peer. */
     fun send(data: ByteArray): String? {
-        return gattClient.send(data)
+        if (gattClient.isConnected) {
+            return gattClient.send(data)
+        }
+        
+        // If not connected as client, try as server.
+        val deviceAddress = connectedDeviceId?.let { deviceMap[it]?.address }
+        if (deviceAddress != null) {
+            val device = bluetoothManager?.adapter?.getRemoteDevice(deviceAddress)
+            if (device != null && gattServer.isRunning) {
+                return gattServer.sendNotification(data, device)
+            }
+        }
+        return "NOT_CONNECTED"
     }
 
     /** Stop everything. */
