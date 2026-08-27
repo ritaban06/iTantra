@@ -1077,20 +1077,3 @@ The primary responsibility of this module is therefore:
 
 > Convert noisy speech into an enhanced speech recording that can be consumed by the project's downstream STT pipeline.
 
-
-
-
----
-
-One thing I recommend before committing this README
-
-Your current notebook has the correct working logic, but I would make one final cleanup before pushing it: move loguru, soundfile, and librosa into the main dependency-installation cell, as we discussed, and remove the separate late installation cell. Then your notebook + this README will tell exactly the same story.
-
-For the GitHub branch, I'd use these two files:
-
-feature/deepfilternet/
-│
-├── deepfilternet_noise_reduction.ipynb
-└── README.md
-
-That is a clean, understandable first contribu
