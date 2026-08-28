@@ -3,6 +3,8 @@ package com.itantra.stt
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import com.itantra.audio.AudioCaptureManager
+import com.itantra.audio.DeepFilterConfig
+import com.itantra.audio.DeepFilterEngine
 import com.itantra.audio.VoiceActivityDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +27,7 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     private var audioManager: AudioCaptureManager? = null
     private val vad = VoiceActivityDetector()
     private var currentLanguage = "en"
+    private var deepFilter: DeepFilterEngine? = null
     
     var onFinalResultIntercept: ((String, Double, String) -> Unit)? = null
     
@@ -112,6 +115,8 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
 
     @ReactMethod
     fun unloadModel(promise: Promise) {
+        deepFilter?.release()
+        deepFilter = null
         sttEngine?.release()
         sttEngine = null
         promise.resolve(true)
@@ -197,13 +202,35 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         vad.reset()
         sttEngine?.startRecognition()
 
+        // Load DeepFilterNet if not already loaded.
+        if (deepFilter == null && DeepFilterConfig.DEFAULT_ENABLED) {
+            deepFilter = DeepFilterEngine(reactApplicationContext)
+            val loaded = deepFilter?.load() == true
+            if (!loaded) {
+                android.util.Log.w("STTModule", "DeepFilterNet failed to load — using raw audio")
+                deepFilter = null
+            }
+        }
+        deepFilter?.reset()
+
         if (audioManager == null) {
             audioManager = AudioCaptureManager(
                 onChunk = { chunk ->
                     val shortArray = ShortArray(chunk.size / 2)
                     ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortArray)
-                    
-                    val stateChanged = vad.processChunk(shortArray)
+
+                    // ── DeepFilterNet: enhance audio before VAD and STT ──
+                    val processedArray = if (deepFilter != null) {
+                        deepFilter!!.process(shortArray)
+                    } else {
+                        shortArray
+                    }
+
+                    // Skip VAD/STT if DeepFilter returned empty (warm-up hop).
+                    if (processedArray.isEmpty()) return@AudioCaptureManager
+
+                    // Feed enhanced audio to VAD.
+                    val stateChanged = vad.processChunk(processedArray)
                     if (stateChanged) {
                         when (vad.currentState) {
                             VoiceActivityDetector.State.SPEECH -> emitEvent("SPEECH_START", Arguments.createMap())
@@ -215,7 +242,14 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
                         }
                     }
 
-                    sttEngine?.feedChunk(chunk)
+                    // Feed enhanced audio to STT engine.
+                    // Convert enhanced ShortArray back to ByteArray (little-endian PCM).
+                    val enhancedChunk = ByteBuffer.allocate(processedArray.size * 2)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                    for (sample in processedArray) {
+                        enhancedChunk.putShort(sample)
+                    }
+                    sttEngine?.feedChunk(enhancedChunk.array())
                 },
                 onError = { error ->
                     val map = Arguments.createMap().apply {
@@ -234,6 +268,13 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     fun stopListening(promise: Promise) {
         audioManager?.stopCapture()
         sttEngine?.getFinalResult()
+        // Log DeepFilter stats for this utterance.
+        deepFilter?.let {
+            if (it.frameCount > 0) {
+                val avgMs = it.totalInferenceNanos / it.frameCount / 1_000_000.0
+                android.util.Log.i("STTModule", "DeepFilter: ${it.frameCount} frames, avg ${String.format("%.2f", avgMs)}ms/frame, ${it.fallbackCount} fallbacks")
+            }
+        }
         promise.resolve(true)
     }
 
