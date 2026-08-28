@@ -5,12 +5,14 @@ import NativeSTT from '../native/NativeSTT';
 import {
   SemanticMessage,
   createSemanticMessage,
-  encode,
-  safeDecode,
-  getEncodedByteLength,
   getLanguageDisplayName,
   capitalizeEmotion,
 } from '../semantic';
+import {
+  encode as binaryEncode,
+  decodeWithFallback,
+  getEncodedByteLength as binaryGetEncodedByteLength,
+} from '../protocol';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
 const { NativeTTS } = NativeModules;
@@ -97,8 +99,8 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             language: languageCodeRef.current,
           });
 
-          const encoded = encode(semanticMsg);
-          const byteLen = getEncodedByteLength(semanticMsg);
+          const encoded = binaryEncode(semanticMsg);
+          const byteLen = binaryGetEncodedByteLength(semanticMsg);
 
           console.log(
             `[BLE Voice] Sending message ${semanticMsg.messageId} (${byteLen} bytes): "${transcript}"`,
@@ -108,19 +110,17 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
           setStatus('SENDING');
           setSendStatus('idle');
 
-          // Base64-encode for the native bridge.
+          // Base64-encode the binary packet for the native bridge.
+          // btoa() expects a string of single-byte chars, so convert Uint8Array → string first.
+          let charStr = '';
+          for (let i = 0; i < encoded.length; i++) {
+            charStr += String.fromCharCode(encoded[i]);
+          }
           let base64: string;
           try {
-            base64 = (globalThis as any).btoa(encoded);
+            base64 = (globalThis as any).btoa(charStr);
           } catch {
-            const bytes: number[] = [];
-            for (let i = 0; i < encoded.length; i++) {
-              const code = encoded.charCodeAt(i);
-              if (code < 0x80) bytes.push(code);
-              else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
-              else bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
-            }
-            base64 = (globalThis as any).btoa(String.fromCharCode(...bytes));
+            base64 = (globalThis as any).btoa(charStr);
           }
 
           NativeBLE.send(base64)
@@ -151,8 +151,25 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
       if (!decoded.trim()) return;
 
-      // Try to decode as a SemanticMessage (V4 path).
-      const semanticMsg = safeDecode(decoded);
+      // Try to decode as a SemanticMessage (V6A binary or V4 JSON fallback).
+      // The decoded string from atob contains raw bytes as char codes.
+      // Convert to Uint8Array for binary detection.
+      let rawData: Uint8Array | string;
+      try {
+        const bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) {
+          bytes[i] = decoded.charCodeAt(i) & 0xff;
+        }
+        // Check if first byte looks like V6A version (0x02) or V4 JSON (0x7B = '{')
+        if (bytes.length > 0 && (bytes[0] === 0x02 || bytes[0] === 0x7b)) {
+          rawData = bytes;
+        } else {
+          rawData = decoded;
+        }
+      } catch {
+        rawData = decoded;
+      }
+      const semanticMsg = decodeWithFallback(rawData);
 
       let text: string;
       let languageDisplay: string;
