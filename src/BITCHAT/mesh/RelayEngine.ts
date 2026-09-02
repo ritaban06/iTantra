@@ -1,16 +1,16 @@
 /**
- * V9B BitChat Relay Engine
+ * V9B/V9C BitChat Relay Engine
  *
  * Transport-agnostic mesh packet processor. Handles:
  * - Deduplication (via DedupCache)
  * - TTL management (via TTLManager)
- * - Local delivery
+ * - Local delivery (destination-aware: only for addressed or broadcast packets)
  * - Controlled flooding to connected peers
  * - Loop prevention (incoming peer exclusion + DedupCache)
  *
  * Does NOT:
  * - Import NativeBLE or any platform code
- * - Implement link-level reliability (V8 handles that)
+ * - Implement link-level reliability (V8 handles that per hop)
  * - Alter V6A/V6B/V7/V8 protocols
  * - Generate packet IDs (caller's responsibility)
  */
@@ -18,6 +18,7 @@
 import { normalizeNodeId } from '../core/BitChatPacket';
 import type { BitChatPacket, NodeId } from '../core/BitChatTypes';
 import { safeDecode as bitChatDecode } from '../core/BitChatPacketCodec';
+import { NODE_ID_BROADCAST, PACKET_TYPE_ANNOUNCE } from '../core/BitChatConstants';
 import type { MeshRouter } from './MeshRouter';
 import type { DedupCache } from './DedupCache';
 
@@ -29,7 +30,7 @@ export type SendToPeerFn = (peerId: NodeId, packet: BitChatPacket) => Promise<vo
 
 /**
  * Callback to deliver a packet to the local application layer.
- * Called exactly once per first-seen packet.
+ * Called exactly once per first-seen packet that is addressed to this node.
  */
 export type DeliverFn = (packet: BitChatPacket, fromPeerId?: NodeId) => void;
 
@@ -62,12 +63,20 @@ export class RelayEngine {
   }
 
   /**
+   * Check if a packet is addressed to this node (unicast) or is broadcast.
+   */
+  private isAddressedToThisNode(packet: BitChatPacket): boolean {
+    const dest = normalizeNodeId(packet.destinationNodeId);
+    return dest === this.localNodeId || dest === NODE_ID_BROADCAST;
+  }
+
+  /**
    * Process an incoming packet from a peer.
    *
    * Flow:
    * 1. Validate packet
    * 2. Dedup check (DROP if duplicate)
-   * 3. Deliver locally (exactly once)
+   * 3. Check destination — deliver locally only if addressed to us or broadcast
    * 4. Check TTL (do not forward if 0)
    * 5. Decrement TTL
    * 6. Get relay peers (exclude incoming peer)
@@ -88,37 +97,52 @@ export class RelayEngine {
       return; // Duplicate — DROP: no deliver, no relay
     }
 
-    // 3. Deliver locally (exactly once for first-seen)
-    this.deliver(packet, fromPeerId);
-
-    // 4. Check TTL
-    const ttl = packet.ttl;
-    if (ttl <= 0) {
-      return; // TTL exhausted — deliver locally but do not forward
+    // 3. ANNOUNCE packets are direct-link-only control packets.
+    // They must NEVER be relayed through the mesh. Deliver locally
+    // (if addressed) but do not forward.
+    if (packet.packetType === PACKET_TYPE_ANNOUNCE) {
+      if (this.isAddressedToThisNode(packet)) {
+        this.deliver(packet, fromPeerId);
+      }
+      return; // ANNOUNCE: never forward
     }
 
-    // 5. Decrement TTL for forwarded copy
+    // 4. Deliver DATA locally only if addressed to this node or broadcast
+    if (this.isAddressedToThisNode(packet)) {
+      this.deliver(packet, fromPeerId);
+    }
+    // Intermediate relay nodes do NOT deliver locally for unicast packets
+    // addressed to other nodes.
+
+    // 5. Check TTL
+    const ttl = packet.ttl;
+    if (ttl <= 0) {
+      return; // TTL exhausted — deliver locally (if applicable) but do not forward
+    }
+
+    // 6. Decrement TTL for forwarded copy
     const forwardedTtl = ttl - 1;
 
-    // 6. Get relay peers
+    // 7. Get relay peers
     const relayPeers = this.router.getRelayPeers(fromPeerId);
 
     if (relayPeers.length === 0) {
       return; // No eligible peers
     }
 
-    // 7. Create forwarded packet (same packetId, sourceNodeId, payload — new TTL)
+    // 8. Create forwarded packet (same identity, new TTL)
     const forwarded: BitChatPacket = {
       version: packet.version,
       packetType: packet.packetType,
       ttl: forwardedTtl,
       sourceNodeId: packet.sourceNodeId,
+      destinationNodeId: packet.destinationNodeId,
       packetId: packet.packetId,
       flags: packet.flags,
       payload: packet.payload,
     };
 
-    // 8. Forward to each peer independently — one failure does not block others
+    // 9. Forward to each peer independently — one failure does not block others
     const results = await Promise.allSettled(
       relayPeers.map(peerId => this.sendToPeer(peerId, forwarded)),
     );
@@ -137,11 +161,11 @@ export class RelayEngine {
    * Process a locally-originated packet.
    *
    * - Mark seen in DedupCache
-   * - Deliver locally if the API semantics require it (for originated packets,
-   *   the caller may want local delivery, but this is optional — the caller
-   *   can choose to deliver before calling originate).
    * - Forward to all connected peers (no incoming peer exclusion)
    * - Decrement TTL for forwarded copy
+   *
+   * Local delivery for originated packets is the caller's responsibility
+   * (the caller already processed the speech before calling originate).
    *
    * @param packet  The locally-originated BitChat packet.
    */
@@ -175,6 +199,7 @@ export class RelayEngine {
       packetType: packet.packetType,
       ttl: forwardedTtl,
       sourceNodeId: packet.sourceNodeId,
+      destinationNodeId: packet.destinationNodeId,
       packetId: packet.packetId,
       flags: packet.flags,
       payload: packet.payload,

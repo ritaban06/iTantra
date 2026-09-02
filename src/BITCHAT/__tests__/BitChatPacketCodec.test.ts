@@ -112,6 +112,7 @@ describe('BitChatPacketCodec', () => {
       packetType: PACKET_TYPE_DATA,
       ttl: DEFAULT_TTL,
       sourceNodeId: '0x0000000000000001',
+      destinationNodeId: '0x000000000000000f',
       packetId: '0x0000000000000042',
       flags: FLAGS_NONE,
       payload: new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]),
@@ -130,6 +131,7 @@ describe('BitChatPacketCodec', () => {
     expect(decoded.packetType).toBe(pkt.packetType);
     expect(decoded.ttl).toBe(pkt.ttl);
     expect(decoded.sourceNodeId).toBe(pkt.sourceNodeId);
+    expect(decoded.destinationNodeId).toBe(pkt.destinationNodeId);
     expect(decoded.packetId).toBe(pkt.packetId);
     expect(decoded.flags).toBe(pkt.flags);
     expect(decoded.payload).toEqual(pkt.payload);
@@ -212,6 +214,11 @@ describe('BitChatPacketCodec', () => {
     expect(() => encode(pkt)).toThrow();
   });
 
+  it('rejects invalid destinationNodeId', () => {
+    const pkt = makePacket({ destinationNodeId: 'bad' as NodeId });
+    expect(() => encode(pkt)).toThrow();
+  });
+
   it('rejects invalid packetId', () => {
     const pkt = makePacket({ packetId: 'bad' as PacketId });
     expect(() => encode(pkt)).toThrow();
@@ -248,10 +255,12 @@ describe('BitChatPacketCodec', () => {
   it('field preservation: all UInt64 values are exact', () => {
     const pkt = makePacket({
       sourceNodeId: '0x1234567890abcdef',
+      destinationNodeId: '0xfedcba9876543210',
       packetId: '0xfedcba0987654321',
     });
     const decoded = decode(encode(pkt));
     expect(decoded.sourceNodeId).toBe('0x1234567890abcdef');
+    expect(decoded.destinationNodeId).toBe('0xfedcba9876543210');
     expect(decoded.packetId).toBe('0xfedcba0987654321');
   });
 });

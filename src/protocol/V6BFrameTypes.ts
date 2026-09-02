@@ -23,6 +23,12 @@ export const V6B_VERSION = 0x03;
 /** Payload is a complete V6A binary packet. */
 export const V6B_FRAME_V6A_MESSAGE = 0x01;
 
+/**
+ * Payload is a complete BITCHAT mesh envelope.
+ * Carries BITCHAT packets over V6B for per-hop transport reliability.
+ */
+export const V6B_FRAME_BITCHAT = 0x02;
+
 /** Acknowledgment frame. Payload: 8-byte UInt64 messageId. Defined only. */
 export const V6B_FRAME_ACK = 0x10;
 
@@ -38,6 +44,7 @@ export const V6B_FRAME_PONG = 0x22;
 /** Set of all recognized frame types for validation. */
 export const V6B_VALID_FRAME_TYPES = new Set([
   V6B_FRAME_V6A_MESSAGE,
+  V6B_FRAME_BITCHAT,
   V6B_FRAME_ACK,
   V6B_FRAME_NACK,
   V6B_FRAME_PING,

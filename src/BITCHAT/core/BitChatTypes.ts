@@ -1,5 +1,5 @@
 /**
- * V9A BitChat Types
+ * V9A/V9C BitChat Types
  *
  * Type definitions for the BitChat mesh protocol.
  * NodeId and PacketId are UInt64 values represented as fixed-width
@@ -8,18 +8,10 @@
 
 // ── UInt64 Identifiers ───────────────────────────────────────────
 
-/**
- * A UInt64 node identifier as a normalized hex string.
- * Format: "0x" + exactly 16 lowercase hex digits.
- * Example: "0x0000000000000001"
- */
+/** A UInt64 node identifier as a normalized hex string. */
 export type NodeId = string;
 
-/**
- * A UInt64 packet identifier as a normalized hex string.
- * Format: "0x" + exactly 16 lowercase hex digits.
- * Example: "0x0000000000000042"
- */
+/** A UInt64 packet identifier as a normalized hex string. */
 export type PacketId = string;
 
 // ── Packet Types ─────────────────────────────────────────────────
@@ -37,6 +29,16 @@ export type BitChatFlags = number;
 
 /**
  * A decoded BitChat mesh packet.
+ *
+ * Wire layout (28-byte header):
+ *   byte  0       version           (UInt8)
+ *   byte  1       packetType        (UInt8)
+ *   byte  2       ttl               (UInt8)
+ *   bytes 3–10    sourceNodeId      (UInt64 BE)
+ *   bytes 11–18   destinationNodeId (UInt64 BE)
+ *   bytes 19–26   packetId          (UInt64 BE)
+ *   byte  27      flags             (UInt8)
+ *   bytes 28+     payload           (N bytes)
  */
 export interface BitChatPacket {
   /** Protocol version (currently 0x01). */
@@ -50,6 +52,10 @@ export interface BitChatPacket {
 
   /** UInt64 source node ID (normalized hex string). */
   sourceNodeId: NodeId;
+
+  /** UInt64 destination node ID (normalized hex string).
+   *  0x0000000000000000 = broadcast (for ANNOUNCE or broadcast DATA). */
+  destinationNodeId: NodeId;
 
   /** UInt64 packet identifier (normalized hex string). */
   packetId: PacketId;

@@ -1,20 +1,24 @@
 /**
- * V9A BitChat Constants
+ * V9A/V9C BitChat Constants
  *
  * Defines the binary protocol constants for the BitChat mesh envelope.
  */
 
 // ── Packet Envelope ──────────────────────────────────────────────
 
-/** Total header size in bytes: version(1) + packetType(1) + ttl(1) + sourceNodeId(8) + packetId(8) + flags(1) = 20. */
-export const HEADER_SIZE = 20;
+/**
+ * Total header size in bytes:
+ *   version(1) + packetType(1) + ttl(1) + sourceNodeId(8) + destinationNodeId(8)
+ *   + packetId(8) + flags(1) = 28 bytes.
+ */
+export const HEADER_SIZE = 28;
 
 /** Protocol version for V9A BitChat envelope. */
 export const PROTOCOL_VERSION = 0x01;
 
 // ── Packet Types ─────────────────────────────────────────────────
 
-/** DATA packet: carries an opaque payload (e.g. V8-encapsulated V6B frame). */
+/** DATA packet: carries an opaque payload (e.g. V6B frame). */
 export const PACKET_TYPE_DATA = 0x01;
 
 /** ANNOUNCE packet: peer discovery announcement. */
@@ -27,6 +31,15 @@ export const VALID_PACKET_TYPES = new Set([PACKET_TYPE_DATA, PACKET_TYPE_ANNOUNC
 
 /** All flags are reserved/zero in V9A. */
 export const FLAGS_NONE = 0x00;
+
+// ── Special NodeId ──────────────────────────────────────────────
+
+/**
+ * Broadcast destination: packet is intended for all nodes.
+ * Used by ANNOUNCE and any future broadcast message types.
+ * 0x0000000000000000 is not a valid individual node ID.
+ */
+export const NODE_ID_BROADCAST = '0x0000000000000000';
 
 // ── TTL ──────────────────────────────────────────────────────────
 

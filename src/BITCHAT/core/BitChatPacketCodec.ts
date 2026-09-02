@@ -1,18 +1,19 @@
 /**
- * V9A BitChat Packet Codec
+ * V9A/V9C BitChat Packet Codec
  *
- * Encodes and decodes the BitChat mesh envelope:
+ * Encodes and decodes the BitChat mesh envelope (28-byte header):
  *
- *   byte  0       version       (UInt8)  — 0x01
- *   byte  1       packetType    (UInt8)  — 0x01=DATA, 0x02=ANNOUNCE
- *   byte  2       ttl           (UInt8)  — 0..255
- *   bytes 3–10    sourceNodeId  (UInt64) — BIG_ENDIAN
- *   bytes 11–18   packetId      (UInt64) — BIG_ENDIAN
- *   byte  19      flags         (UInt8)  — reserved, zero
- *   bytes 20+     payload       (N bytes) — opaque
+ *   byte  0       version           (UInt8)  — 0x01
+ *   byte  1       packetType        (UInt8)  — 0x01=DATA, 0x02=ANNOUNCE
+ *   byte  2       ttl               (UInt8)  — 0..255
+ *   bytes 3–10    sourceNodeId      (UInt64) — BIG_ENDIAN
+ *   bytes 11–18   destinationNodeId (UInt64) — BIG_ENDIAN
+ *   bytes 19–26   packetId          (UInt64) — BIG_ENDIAN
+ *   byte  27      flags             (UInt8)  — reserved, zero
+ *   bytes 28+     payload           (N bytes) — opaque
  *
- * Total header: 20 bytes.
- * Payload length: derived from total byte length — 20.
+ * Total header: 28 bytes.
+ * Payload length: derived from total byte length — 28.
  */
 
 import {
@@ -36,30 +37,28 @@ import {
  * @throws If the packet has invalid fields.
  */
 export function encode(packet: BitChatPacket): Uint8Array {
-  // Validate version
   if (packet.version !== PROTOCOL_VERSION) {
     throw new Error(`Invalid BitChat version: 0x${packet.version.toString(16)}`);
   }
 
-  // Validate packet type
   if (!VALID_PACKET_TYPES.has(packet.packetType)) {
     throw new Error(`Invalid BitChat packet type: 0x${packet.packetType.toString(16)}`);
   }
 
-  // Validate TTL
   if (typeof packet.ttl !== 'number' || packet.ttl < 0 || packet.ttl > 255 || !Number.isInteger(packet.ttl)) {
     throw new Error(`Invalid TTL: ${packet.ttl}`);
   }
 
-  // Validate identifiers
   if (!isValidNodeId(packet.sourceNodeId)) {
     throw new Error(`Invalid sourceNodeId: "${packet.sourceNodeId}"`);
+  }
+  if (!isValidNodeId(packet.destinationNodeId)) {
+    throw new Error(`Invalid destinationNodeId: "${packet.destinationNodeId}"`);
   }
   if (!isValidPacketId(packet.packetId)) {
     throw new Error(`Invalid packetId: "${packet.packetId}"`);
   }
 
-  // Validate flags
   if (typeof packet.flags !== 'number' || packet.flags < 0 || packet.flags > 255) {
     throw new Error(`Invalid flags: ${packet.flags}`);
   }
@@ -71,8 +70,9 @@ export function encode(packet: BitChatPacket): Uint8Array {
   buf[1] = packet.packetType;
   buf[2] = packet.ttl;
   writeUInt64BE(buf, 3, packet.sourceNodeId);
-  writeUInt64BE(buf, 11, packet.packetId);
-  buf[19] = packet.flags;
+  writeUInt64BE(buf, 11, packet.destinationNodeId);
+  writeUInt64BE(buf, 19, packet.packetId);
+  buf[27] = packet.flags;
   buf.set(packet.payload, HEADER_SIZE);
 
   return buf;
@@ -107,10 +107,10 @@ export function decode(bytes: Uint8Array): BitChatPacket {
   }
 
   const sourceNodeId = readUInt64BE(bytes, 3) as NodeId;
-  const packetId = readUInt64BE(bytes, 11) as PacketId;
-  const flags = bytes[19];
+  const destinationNodeId = readUInt64BE(bytes, 11) as NodeId;
+  const packetId = readUInt64BE(bytes, 19) as PacketId;
+  const flags = bytes[27];
 
-  // Payload is everything after the header
   const payload = bytes.slice(HEADER_SIZE);
 
   return {
@@ -118,6 +118,7 @@ export function decode(bytes: Uint8Array): BitChatPacket {
     packetType,
     ttl,
     sourceNodeId,
+    destinationNodeId,
     packetId,
     flags,
     payload,

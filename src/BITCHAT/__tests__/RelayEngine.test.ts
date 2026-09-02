@@ -12,17 +12,20 @@ import {
   PACKET_TYPE_DATA,
   PACKET_TYPE_ANNOUNCE,
   DEFAULT_TTL,
+  NODE_ID_BROADCAST,
 } from '../core/BitChatConstants';
 import type { BitChatPacket, NodeId } from '../core/BitChatTypes';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
+/** Create a packet with destinationNodeId defaulting to BROADCAST (V9C backward compat). */
 function makePacket(overrides?: Partial<BitChatPacket>): BitChatPacket {
   return {
     version: PROTOCOL_VERSION,
     packetType: PACKET_TYPE_DATA,
     ttl: DEFAULT_TTL,
     sourceNodeId: '0x00000000000000AA',
+    destinationNodeId: NODE_ID_BROADCAST,
     packetId: '0x0000000000000001',
     flags: 0,
     payload: new Uint8Array([0xDE, 0xAD]),
@@ -33,6 +36,7 @@ function makePacket(overrides?: Partial<BitChatPacket>): BitChatPacket {
 function makeAnnounce(overrides?: Partial<BitChatPacket>): BitChatPacket {
   return makePacket({
     packetType: PACKET_TYPE_ANNOUNCE,
+    destinationNodeId: NODE_ID_BROADCAST,
     payload: new Uint8Array(9).fill(0x01),
     ...overrides,
   });
@@ -418,16 +422,19 @@ describe('RelayEngine', () => {
   // ── ANNOUNCE ──────────────────────────────────────────────────
 
   // Test 23
-  it('ANNOUNCE packets use the same forwarding mechanics', async () => {
+  it('ANNOUNCE packets are delivered locally but never forwarded', async () => {
     const ctx = createContext();
     ctx.registry.markConnected('0x0000000000000001');
+    ctx.registry.markConnected('0x0000000000000003');
 
-    const pkt = makeAnnounce();
+    const pkt = makeAnnounce({ ttl: 5 });
     await ctx.engine.receive(pkt, '0x0000000000000002');
 
+    // Should deliver locally (broadcast)
     expect(ctx.deliveries.length).toBe(1);
     expect(ctx.deliveries[0].packet.packetType).toBe(PACKET_TYPE_ANNOUNCE);
-    expect(ctx.sentTo.has('0x0000000000000001')).toBe(true);
+    // Should NOT forward — ANNOUNCE is direct-link-only
+    expect(ctx.sentTo.size).toBe(0);
   });
 
   // Test 24
@@ -442,6 +449,139 @@ describe('RelayEngine', () => {
     expect(ctx.sentTo.size).toBe(0);
   });
 });
+
+// ── Destination-Aware Delivery (V9C) ───────────────────────────
+
+describe('RelayEngine — Destination-Aware Delivery (V9C)', () => {
+  // Test 25: unicast packet addressed to another node is NOT delivered locally
+  it('unicast packet addressed to different node is not delivered locally', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makePacket({
+      sourceNodeId: '0x00000000000000DD',
+      destinationNodeId: '0x00000000000000FF',
+    });
+    await ctx.engine.receive(pkt, '0x00000000000000BB');
+
+    // Should NOT deliver locally (addressed to 0xff, not us)
+    expect(ctx.deliveries.length).toBe(0);
+    // Should still forward to connected peers
+    expect(ctx.sentTo.has(normalizeNodeId('0x00000000000000CC'))).toBe(true);
+  });
+
+  // Test 26: unicast packet addressed to local node IS delivered
+  it('unicast packet addressed to local node is delivered locally', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makePacket({
+      sourceNodeId: '0x00000000000000DD',
+      destinationNodeId: '0x00000000000000AA',
+    });
+    await ctx.engine.receive(pkt, '0x00000000000000BB');
+
+    // Should deliver locally
+    expect(ctx.deliveries.length).toBe(1);
+    // Should still forward
+    expect(ctx.sentTo.has(normalizeNodeId('0x00000000000000CC'))).toBe(true);
+  });
+
+  // Test 27: broadcast packet IS delivered locally
+  it('broadcast packet is delivered locally', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makePacket({
+      sourceNodeId: '0x00000000000000DD',
+      destinationNodeId: NODE_ID_BROADCAST,
+    });
+    await ctx.engine.receive(pkt, '0x00000000000000BB');
+
+    // Should deliver locally
+    expect(ctx.deliveries.length).toBe(1);
+    // Should forward
+    expect(ctx.sentTo.has(normalizeNodeId('0x00000000000000CC'))).toBe(true);
+  });
+
+  // Test 28: originated packet with unicast destination — source does NOT deliver locally
+  it('originated unicast packet is not delivered at source', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makePacket({
+      sourceNodeId: '0x00000000000000AA',
+      destinationNodeId: '0x00000000000000FF',
+    });
+    await ctx.engine.originate(pkt);
+
+    // Originated packet is not delivered locally (caller handles that)
+    // Only forwarded to peers
+    expect(ctx.sentTo.has(normalizeNodeId('0x00000000000000CC'))).toBe(true);
+  });
+
+  // Test 29: destinationNodeId is preserved across relay
+  it('destinationNodeId is preserved across relay', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makePacket({
+      sourceNodeId: '0x00000000000000DD',
+      destinationNodeId: '0x00000000000000FF',
+    });
+    await ctx.engine.receive(pkt, '0x00000000000000BB');
+
+    const forwarded = ctx.sentTo.get(normalizeNodeId('0x00000000000000CC'))!;
+    expect(forwarded[0].destinationNodeId).toBe('0x00000000000000FF');
+  });
+
+  // Test 30: ANNOUNCE with broadcast destination is delivered locally
+  it('ANNOUNCE with broadcast destination is delivered locally', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makeAnnounce({ destinationNodeId: NODE_ID_BROADCAST });
+    await ctx.engine.receive(pkt, '0x00000000000000BB');
+
+    expect(ctx.deliveries.length).toBe(1);
+    expect(ctx.deliveries[0].packet.packetType).toBe(PACKET_TYPE_ANNOUNCE);
+  });
+
+  // Test 31: ANNOUNCE is NEVER relayed even with TTL > 0
+  it('ANNOUNCE is never relayed through mesh', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000BB');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makeAnnounce({
+      ttl: 5,
+      sourceNodeId: '0x00000000000000DD',
+    });
+    await ctx.engine.receive(pkt, '0x00000000000000BB');
+
+    // Should deliver locally (broadcast)
+    expect(ctx.deliveries.length).toBe(1);
+    // Should NOT forward to any peer
+    expect(ctx.sentTo.size).toBe(0);
+  });
+
+  // Test 32: DATA continues to forward normally after ANNOUNCE fix
+  it('DATA packets still forward normally', async () => {
+    const ctx = createContext('0x00000000000000AA');
+    ctx.registry.markConnected('0x00000000000000BB');
+    ctx.registry.markConnected('0x00000000000000CC');
+
+    const pkt = makePacket({ ttl: 5 });
+    await ctx.engine.receive(pkt, '0x00000000000000DD');
+
+    // Should deliver locally (broadcast)
+    expect(ctx.deliveries.length).toBe(1);
+    // Should forward to BB and CC
+    expect(ctx.sentTo.has(normalizeNodeId('0x00000000000000BB'))).toBe(true);
+    expect(ctx.sentTo.has(normalizeNodeId('0x00000000000000CC'))).toBe(true);
+  });
+});
+
 
 // ── Helper ───────────────────────────────────────────────────────
 

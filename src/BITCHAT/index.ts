@@ -14,6 +14,7 @@ export {
   PACKET_TYPE_ANNOUNCE,
   VALID_PACKET_TYPES,
   FLAGS_NONE,
+  NODE_ID_BROADCAST,
   DEFAULT_TTL,
   MAX_TTL,
   DEDUP_MAX_ENTRIES,
@@ -67,3 +68,13 @@ export { MeshRouter } from './mesh';
 export type { PeerQuery } from './mesh';
 export { RelayEngine } from './mesh';
 export type { SendToPeerFn, DeliverFn, RelayEngineParams } from './mesh';
+
+// ── Identity ──────────────────────────────────────────────────
+
+export { NodeIdStore } from './NodeIdStore';
+export type { StorageBackend } from './NodeIdStore';
+
+// ── BLE Integration ──────────────────────────────────────────
+
+export { BitChatBLEAdapter } from './BitChatBLEAdapter';
+export type { BleSendFn, LocalDeliverFn, BitChatBLEAdapterParams } from './BitChatBLEAdapter';

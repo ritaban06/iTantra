@@ -17,6 +17,7 @@ import {
   SequenceManager,
   SequenceValidator,
   V6B_FRAME_V6A_MESSAGE,
+  V6B_FRAME_BITCHAT,
   V6B_FRAME_ACK,
   V6B_FRAME_NACK,
   V6B_VERSION,
@@ -29,6 +30,13 @@ import {
   DeliveredMessageCache,
   CompletedGroupCache,
 } from '../protocol';
+import {
+  BitChatBLEAdapter,
+  NodeIdStore,
+  normalizeNodeId,
+  normalizePacketId,
+  NODE_ID_BROADCAST,
+} from '../BITCHAT';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
 const { NativeTTS } = NativeModules;
@@ -100,6 +108,21 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   const completedGroupCacheRef = useRef(new CompletedGroupCache());
   const reliabilityManagerRef = useRef<ReliabilityManager | null>(null);
 
+  // V9C BITCHAT mesh state
+  const nodeIdStoreRef = useRef<NodeIdStore | null>(null);
+  const bitchatAdapterRef = useRef<BitChatBLEAdapter | null>(null);
+  const bleAnnounceSentRef = useRef(false);
+
+  /** Simple AsyncStorage-compatible storage for NodeIdStore. */
+  const storageBackend = useRef({
+    getItem: async (key: string): Promise<string | null> => {
+      try { return await NativeModules?.AsyncStorage?.getItem(key) ?? null; } catch { return null; }
+    },
+    setItem: async (key: string, value: string): Promise<void> => {
+      try { await NativeModules?.AsyncStorage?.setItem(key, value); } catch { /* ignore */ }
+    },
+  }).current;
+
   /** Helper: send a V6B frame over BLE. */
   const sendV6BFrame = useCallback(async (frame: Uint8Array): Promise<void> => {
     let charStr = '';
@@ -114,6 +137,170 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     }
     await NativeBLE.send(base64);
   }, []);
+
+  /**
+   * Process a V6B payload through the existing decode pipeline.
+   * Used by both direct V6B reception and BITCHAT local delivery.
+   */
+  const processV6BPayload = useCallback((v6bPayload: Uint8Array, fromPeerId: string) => {
+    let semanticMsg = null;
+
+    if (v6bPayload.length > 0 && v6bPayload[0] === V6B_VERSION) {
+      const frame = v6bDecode(v6bPayload);
+
+      // V8: intercept ACK/NACK
+      if (frame.frameType === V6B_FRAME_ACK) {
+        const ackMsgId = ReliabilityManager.parseAckPayload(frame.payload);
+        if (ackMsgId) reliabilityManagerRef.current?.handleAck(ackMsgId);
+        return;
+      }
+      if (frame.frameType === V6B_FRAME_NACK) {
+        const nackData = ReliabilityManager.parseNackPayload(frame.payload);
+        if (nackData) reliabilityManagerRef.current?.handleNack(nackData.groupId, nackData.reason);
+        return;
+      }
+
+      if (frame.frameType === V6B_FRAME_V6A_MESSAGE) {
+        const seqResult = seqValidatorRef.current.validate(fromPeerId, frame.sequence);
+        if (seqResult.duplicate) {
+          console.log(`[BLE Voice] Duplicate sequence ${frame.sequence} from ${fromPeerId}`);
+        }
+
+        if (frame.payload.length > 0 && frame.payload[0] === V7_MARKER) {
+          try {
+            const header = parseHeader(frame.payload);
+            const cachedMsgId = completedGroupCacheRef.current.getCompletedMessageId(fromPeerId, header.groupId);
+            if (cachedMsgId) {
+              const ackPayload = ReliabilityManager.buildAckPayload(cachedMsgId);
+              const ackFrame = v6bEncode(seqManagerRef.current.nextSequence(), V6B_FRAME_ACK, ackPayload);
+              sendV6BFrame(ackFrame).catch(() => {});
+            } else {
+              const v6aChunk = frame.payload.slice(V7_HEADER_SIZE);
+              const result = reassemblerRef.current.addFragment(fromPeerId, header, v6aChunk);
+              if (result.status === 'complete') {
+                semanticMsg = decodeWithFallback(result.v6aPacket);
+                if (semanticMsg) {
+                  const msgId = semanticMsg.messageId;
+                  const groupId = header.groupId;
+                  if (deliveredCacheRef.current.isDelivered(fromPeerId, msgId)) {
+                    const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+                    const ackFrame = v6bEncode(seqManagerRef.current.nextSequence(), V6B_FRAME_ACK, ackPayload);
+                    sendV6BFrame(ackFrame).catch(() => {});
+                    semanticMsg = null;
+                  } else {
+                    deliveredCacheRef.current.markDelivered(fromPeerId, msgId);
+                    completedGroupCacheRef.current.store(fromPeerId, groupId, msgId);
+                    const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+                    const ackFrame = v6bEncode(seqManagerRef.current.nextSequence(), V6B_FRAME_ACK, ackPayload);
+                    sendV6BFrame(ackFrame).catch(() => {});
+                  }
+                }
+              } else if (result.status === 'error') {
+                console.warn(`[BLE Voice] V7 reassembly error: ${result.reason}`);
+              }
+            }
+          } catch (e: any) {
+            console.warn(`[BLE Voice] V7 fragment parse error: ${e.message}`);
+          }
+        } else {
+          semanticMsg = decodeWithFallback(frame.payload);
+          if (semanticMsg) {
+            const msgId = semanticMsg.messageId;
+            if (deliveredCacheRef.current.isDelivered(fromPeerId, msgId)) {
+              const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+              const ackFrame = v6bEncode(seqManagerRef.current.nextSequence(), V6B_FRAME_ACK, ackPayload);
+              sendV6BFrame(ackFrame).catch(() => {});
+              semanticMsg = null;
+            } else {
+              deliveredCacheRef.current.markDelivered(fromPeerId, msgId);
+              const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+              const ackFrame = v6bEncode(seqManagerRef.current.nextSequence(), V6B_FRAME_ACK, ackPayload);
+              sendV6BFrame(ackFrame).catch(() => {});
+            }
+          }
+        }
+      }
+    } else if (v6bPayload.length > 0 && v6bPayload[0] === 0x02) {
+      semanticMsg = decodeWithFallback(v6bPayload);
+    } else if (v6bPayload.length > 0 && v6bPayload[0] === 0x7b) {
+      semanticMsg = decodeWithFallback(v6bPayload);
+    }
+
+    // Build message for UI
+    let text = '';
+    let languageDisplay = 'Unknown';
+    let emotionDisplay = 'Unknown';
+    let emotionConfidencePct = 0;
+    let voiceProfileDisplay = 'Unknown';
+
+    if (semanticMsg) {
+      text = semanticMsg.text;
+      languageDisplay = getLanguageDisplayName(semanticMsg.language);
+      emotionDisplay = capitalizeEmotion(semanticMsg.emotion);
+      emotionConfidencePct = Math.round(semanticMsg.emotionConfidence * 100);
+      voiceProfileDisplay = semanticMsg.voiceProfile;
+      console.log(`[BLE Voice] Received message ${semanticMsg.messageId} from ${fromPeerId}: "${text}"`);
+    } else {
+      console.warn(`[BLE Voice] Unparseable data from ${fromPeerId}`);
+      return;
+    }
+
+    const message: BLEVoiceMessage = {
+      semanticMessage: semanticMsg, text, fromDevice: fromPeerId, time: Date.now(),
+      status: 'received', languageDisplay, emotionDisplay, emotionConfidencePct, voiceProfileDisplay,
+    };
+    setLastReceivedMessage(message);
+    setReceivedMessages((prev) => [message, ...prev].slice(0, 20));
+
+    if (!isMutedRef.current) { NativeSTT.muteMic(); isMutedRef.current = true; }
+    setStatus('SPEAKING');
+    const ttsLanguage = semanticMsg?.language ?? 'en';
+    NativeTTS.speak(text, ttsLanguage, false)
+      .then(() => {
+        if (isMutedRef.current) { NativeSTT.unmuteMic(); isMutedRef.current = false; }
+        setStatus(enabled ? 'WAITING_FOR_SPEECH' : 'OFF');
+        setReceivedMessages((prev) => prev.map((m) => m.time === message.time ? { ...m, status: 'spoken' as const } : m));
+      })
+      .catch((err: any) => {
+        if (isMutedRef.current) { NativeSTT.unmuteMic(); isMutedRef.current = false; }
+        setVoiceError(`TTS error: ${err.message || err}`);
+        setStatus('ERROR');
+      });
+  }, [enabled]);
+
+  /** Initialize or get the BITCHAT adapter. */
+  const getOrCreateAdapter = useCallback(async (): Promise<BitChatBLEAdapter> => {
+    if (bitchatAdapterRef.current) return bitchatAdapterRef.current;
+
+    // Get or create NodeIdStore
+    if (!nodeIdStoreRef.current) {
+      nodeIdStoreRef.current = new NodeIdStore(storageBackend);
+    }
+    const localNodeId = await nodeIdStoreRef.current.getLocalNodeId();
+
+    // Create adapter
+    const adapter = new BitChatBLEAdapter({
+      localNodeId,
+      bleSend: async (_peerBleId: string, payload: Uint8Array) => {
+        // V9C: Wrap BITCHAT envelope in V6B for per-hop transport reliability.
+        // Each forwarded packet gets its own V6B sequence via the shared SequenceManager.
+        const seq = seqManagerRef.current.nextSequence();
+        const v6bFrame = v6bEncode(seq, V6B_FRAME_BITCHAT, payload);
+        let charStr = '';
+        for (let i = 0; i < v6bFrame.length; i++) {
+          charStr += String.fromCharCode(v6bFrame[i]);
+        }
+        const base64 = (globalThis as any).btoa(charStr);
+        await NativeBLE.send(base64);
+      },
+      onLocalDeliver: (v6bPayload: Uint8Array, fromPeerId?: string) => {
+        // Pass the V6B payload to the existing decode pipeline
+        processV6BPayload(v6bPayload, fromPeerId ?? 'unknown');
+      },
+    });
+    bitchatAdapterRef.current = adapter;
+    return adapter;
+  }, [storageBackend]);
 
   /** Helper: send the initial DATA frames for a PendingMessage (single or fragmented). */
   const sendInitialData = useCallback(async (msg: import('../protocol').PendingMessage): Promise<void> => {
@@ -226,8 +413,27 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
           }
 
           if (result.active) {
-            // Message became active — send DATA frames now.
-            sendInitialData(result.message)
+            // V9C: Single send path.
+            // If BITCHAT adapter is active, originate through mesh ONLY.
+            // If no adapter, use direct V6B path with V8 reliability.
+            const adapter = bitchatAdapterRef.current;
+
+            const doSend = async (): Promise<void> => {
+              if (adapter && v6aEncoded.length > 0) {
+                // Mesh mode: originate through BITCHAT adapter.
+                // The adapter wraps in V6B + V6B_FRAME_BITCHAT internally.
+                // V8 reliability is handled per-hop by V6B framing.
+                const packetId = normalizePacketId(
+                  BigInt(Date.now()) ^ BigInt('0x' + semanticMsg.messageId.slice(2)),
+                );
+                await adapter.originate(result.message.v6aPacket, packetId);
+              } else {
+                // Direct mode: send V6B frames with V8 reliability.
+                await sendInitialData(result.message);
+              }
+            };
+
+            doSend()
               .then(() => {
                 setSendStatus('sent');
                 setStatus('SENT');
@@ -296,6 +502,16 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
               reliabilityManagerRef.current?.handleNack(nackData.groupId, nackData.reason);
             }
             return; // NACK is control — stop processing
+          }
+
+          // V9C: BITCHAT mesh packet carried inside V6B frame
+          if (frame.frameType === V6B_FRAME_BITCHAT) {
+            const adapter = bitchatAdapterRef.current;
+            if (adapter) {
+              // frame.payload is the raw BITCHAT envelope
+              adapter.receive(frame.payload, event.fromDevice).catch(() => {});
+            }
+            return; // BITCHAT handles delivery/relay — stop further processing
           }
 
           if (frame.frameType === V6B_FRAME_V6A_MESSAGE) {
@@ -543,6 +759,24 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       cleanupTimerRef.current = setInterval(() => {
         reassemblerRef.current.cleanup();
       }, 10_000);
+
+      // V9C: Initialize BITCHAT adapter and send ANNOUNCE for peer discovery
+      getOrCreateAdapter().then((adapter) => {
+        if (!bleAnnounceSentRef.current) {
+          const announcePkt = adapter.createAnnouncePacket();
+          let charStr = '';
+          for (let i = 0; i < announcePkt.length; i++) {
+            charStr += String.fromCharCode(announcePkt[i]);
+          }
+          const base64 = (globalThis as any).btoa(charStr);
+          NativeBLE.send(base64).then(() => {
+            bleAnnounceSentRef.current = true;
+            console.log(`[BLE Voice] BITCHAT ANNOUNCE sent (nodeId: ${adapter.getLocalNodeId()})`);
+          }).catch(() => {
+            console.warn('[BLE Voice] BITCHAT ANNOUNCE send failed');
+          });
+        }
+      }).catch(() => {});
     }
     return () => {
       if (cleanupTimerRef.current) {
@@ -561,6 +795,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       setStatus('OFF');
       setVoiceError(null);
       setLastSentMessage(null);
+      bleAnnounceSentRef.current = false;
       // Unmute if muted.
       if (isMutedRef.current) {
         NativeSTT.unmuteMic();
