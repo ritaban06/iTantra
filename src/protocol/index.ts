@@ -27,6 +27,7 @@ export {
   fnv1a64,
   hashMessageId,
   encode,
+  encodeUnrestricted,
   decode,
   safeDecode,
   decodeWithFallback,
@@ -66,3 +67,33 @@ export {
 } from './SequenceValidator';
 
 export type { SequenceValidationResult } from './SequenceValidator';
+
+// ── V7 BLE Fragmentation ────────────────────────────────────────
+
+export {
+  V7_MARKER,
+  V7_HEADER_SIZE,
+  MAX_FRAGMENTS,
+  MAX_CHUNK_SIZE,
+  MAX_V6A_LENGTH,
+  MAX_CONCURRENT_GROUPS,
+  GROUP_EXPIRY_MS,
+  MAX_GROUP_KEY_LENGTH,
+  V7_MAX_V6B_PAYLOAD,
+  V7_MAX_V6B_FRAME,
+  V7FragmentError,
+} from './V7FragmentTypes';
+
+export type {
+  FragmentHeader,
+  FragmentChunk,
+  FragmentState,
+  ReassemblyResult,
+} from './V7FragmentTypes';
+
+export {
+  splitV6A,
+  parseHeader,
+} from './FragmentCodec';
+
+export { Reassembler } from './Reassembler';

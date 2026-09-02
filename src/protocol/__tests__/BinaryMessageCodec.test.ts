@@ -7,6 +7,7 @@
 import { SemanticMessage } from '../../semantic/SemanticMessageTypes';
 import {
   encode,
+  encodeUnrestricted,
   decode,
   safeDecode,
   decodeWithFallback,
@@ -670,6 +671,87 @@ describe('V6A BinaryMessageCodec', () => {
       const packet = encode(msg);
       // 0.996 * 255 = 253.98 → 254
       expect(packet[4]).toBe(254);
+    });
+  });
+
+  // ════════════════════════════════════════════════════════════════
+  // 20. encodeUnrestricted()
+  // ════════════════════════════════════════════════════════════════
+
+  describe('encodeUnrestricted', () => {
+    it('produces identical bytes to encode() for messages <=509 bytes', () => {
+      const msg = makeMessage({ text: 'Hello judges' });
+      const restricted = encode(msg);
+      const unrestricted = encodeUnrestricted(msg);
+      expect(unrestricted.length).toBe(restricted.length);
+      for (let i = 0; i < restricted.length; i++) {
+        expect(unrestricted[i]).toBe(restricted[i]);
+      }
+    });
+
+    it('accepts a V6A packet >509 bytes', () => {
+      const text = 'x'.repeat(500); // 500 + 18 = 518 > 509
+      const msg = makeMessage({ text });
+      const packet = encodeUnrestricted(msg);
+      expect(packet.length).toBe(518);
+    });
+
+    it('the oversized packet is decodable by decode()', () => {
+      const text = 'x'.repeat(500);
+      const msg = makeMessage({ text });
+      const packet = encodeUnrestricted(msg);
+      const decoded = decode(packet);
+      expect(decoded.text).toBe(text);
+      expect(decoded.language).toBe('en');
+    });
+
+    it('V6A wire bytes are identical regardless of encode path', () => {
+      const msg = makeMessage({ text: 'Test identical bytes', language: 'hi', emotion: 'happy' });
+      const a = encode(msg);
+      const b = encodeUnrestricted(msg);
+      expect(a.length).toBe(b.length);
+      for (let i = 0; i < a.length; i++) {
+        expect(a[i]).toBe(b[i]);
+      }
+    });
+
+    it('a >509-byte packet can be passed to FragmentCodec.splitV6A()', () => {
+      const { splitV6A } = require('../FragmentCodec');
+      const text = 'a'.repeat(982); // 982 + 18 = 1000 bytes V6A
+      const msg = makeMessage({ text });
+      const packet = encodeUnrestricted(msg);
+      expect(packet.length).toBe(1000);
+
+      const chunks = splitV6A(packet);
+      expect(chunks.length).toBe(3); // 1000/490 = 3
+      // Each chunk payload should be <= 499 (V6B max payload)
+      for (const chunk of chunks) {
+        expect(chunk.payload.length).toBeLessThanOrEqual(499);
+      }
+    });
+
+    it('encode() still throws PAYLOAD_TOO_LARGE for oversized packets', () => {
+      const text = 'x'.repeat(500); // 518 > 509
+      const msg = makeMessage({ text });
+      expect(() => encode(msg)).toThrow(BinaryCodecError);
+      expect(() => encode(msg)).toThrow(/exceeds BLE payload limit/);
+    });
+
+    it('existing <=509-byte behavior remains unchanged', () => {
+      const msg = makeMessage({ text: 'Hello judges' });
+      const packet = encode(msg);
+      expect(packet.length).toBe(30);
+      expect(packet[0]).toBe(PROTOCOL_VERSION);
+      expect(decode(packet).text).toBe('Hello judges');
+    });
+
+    it('multilingual Unicode text works with encodeUnrestricted', () => {
+      const text = '\u0906\u092A \u0915\u0948\u0938\u0947 \u0939\u0948\u0902 \uD83C\uDF0D';
+      const msg = makeMessage({ text, language: 'hi' });
+      const packet = encodeUnrestricted(msg);
+      const decoded = decode(packet);
+      expect(decoded.text).toBe(text);
+      expect(decoded.language).toBe('hi');
     });
   });
 });

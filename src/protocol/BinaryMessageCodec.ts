@@ -232,31 +232,19 @@ function utf8ByteLength(str: string): number {
 // ── Encode ────────────────────────────────────────────────────────
 
 /**
- * Encode a SemanticMessage to a V6A binary packet (Uint8Array).
+ * Internal: build a V6A packet from a validated SemanticMessage.
  *
- * The original string messageId is preserved by the caller's context.
- * The wire format uses only the FNV-1a UInt64 compact hash.
- *
- * @throws {BinaryCodecError} if the message fails validation.
+ * Performs no size validation — the caller decides whether to enforce
+ * transport limits. This is the shared implementation for both encode()
+ * and encodeUnrestricted().
  */
-export function encode(message: SemanticMessage): Uint8Array {
-  // Validate the SemanticMessage before encoding.
-  validateSemanticMessage(message);
-
+function buildPacket(message: SemanticMessage): Uint8Array {
   // Encode text to UTF-8.
   const textBytes = utf8Encode(message.text);
   const textLength = textBytes.length;
 
-  // Validate text fits in BLE transport.
-  const totalSize = HEADER_SIZE + textLength;
-  if (totalSize > MAX_BLE_PAYLOAD) {
-    throw new BinaryCodecError(
-      `Encoded packet (${totalSize} bytes) exceeds BLE payload limit (${MAX_BLE_PAYLOAD} bytes)`,
-      'PAYLOAD_TOO_LARGE',
-    );
-  }
-
   // Allocate the packet buffer.
+  const totalSize = HEADER_SIZE + textLength;
   const packet = new Uint8Array(totalSize);
 
   // Byte 0: version
@@ -288,6 +276,44 @@ export function encode(message: SemanticMessage): Uint8Array {
   packet.set(textBytes, HEADER_SIZE);
 
   return packet;
+}
+
+/**
+ * Encode a SemanticMessage to a V6A binary packet (Uint8Array).
+ *
+ * Enforces the BLE payload limit (509 bytes). Throws PAYLOAD_TOO_LARGE
+ * if the encoded packet exceeds this limit.
+ *
+ * For V7 fragmentation of oversized packets, use encodeUnrestricted().
+ *
+ * @throws {BinaryCodecError} if the message fails validation or exceeds BLE limit.
+ */
+export function encode(message: SemanticMessage): Uint8Array {
+  validateSemanticMessage(message);
+  const packet = buildPacket(message);
+
+  if (packet.length > MAX_BLE_PAYLOAD) {
+    throw new BinaryCodecError(
+      `Encoded packet (${packet.length} bytes) exceeds BLE payload limit (${MAX_BLE_PAYLOAD} bytes)`,
+      'PAYLOAD_TOO_LARGE',
+    );
+  }
+
+  return packet;
+}
+
+/**
+ * Encode a SemanticMessage to a V6A binary packet without the BLE size limit.
+ *
+ * Produces the exact same V6A wire format as encode(). The only difference
+ * is that packets > 509 bytes are permitted, enabling V7 fragmentation of
+ * oversized messages.
+ *
+ * @throws {BinaryCodecError} if the message fails validation.
+ */
+export function encodeUnrestricted(message: SemanticMessage): Uint8Array {
+  validateSemanticMessage(message);
+  return buildPacket(message);
 }
 
 // ── Decode ────────────────────────────────────────────────────────

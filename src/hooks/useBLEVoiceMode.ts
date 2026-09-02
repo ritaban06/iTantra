@@ -9,7 +9,7 @@ import {
   capitalizeEmotion,
 } from '../semantic';
 import {
-  encode as binaryEncode,
+  encodeUnrestricted,
   decodeWithFallback,
   getEncodedByteLength as binaryGetEncodedByteLength,
   v6bEncode,
@@ -18,6 +18,11 @@ import {
   SequenceValidator,
   V6B_FRAME_V6A_MESSAGE,
   V6B_VERSION,
+  splitV6A,
+  parseHeader,
+  Reassembler,
+  V7_MARKER,
+  V7_HEADER_SIZE,
 } from '../protocol';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
@@ -81,6 +86,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   const seqManagerRef = useRef(new SequenceManager(0));
   const seqValidatorRef = useRef(new SequenceValidator());
 
+  // V7 fragmentation state
+  const reassemblerRef = useRef(new Reassembler());
+  const cleanupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Keep languageCode ref current for event handlers.
   languageCodeRef.current = languageCode;
 
@@ -109,47 +118,96 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             language: languageCodeRef.current,
           });
 
-          const v6aEncoded = binaryEncode(semanticMsg);
+          const v6aEncoded = encodeUnrestricted(semanticMsg);
           const byteLen = binaryGetEncodedByteLength(semanticMsg);
 
-          // Wrap V6A packet in V6B transport envelope
-          const seq = seqManagerRef.current.nextSequence();
-          const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, v6aEncoded);
+          // V7 fragmentation: split if V6A exceeds V6B payload limit
+          const fragments = splitV6A(v6aEncoded);
 
-          console.log(
-            `[BLE Voice] Sending message ${semanticMsg.messageId} (V6A ${byteLen} bytes, V6B seq=${seq}): "${transcript}"`,
-          );
+          if (fragments.length === 0) {
+            // Single-frame: V6A fits in V6B directly (≤ 499 bytes)
+            const seq = seqManagerRef.current.nextSequence();
+            const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, v6aEncoded);
 
-          setLastSentMessage(semanticMsg);
-          setStatus('SENDING');
-          setSendStatus('idle');
+            console.log(
+              `[BLE Voice] Sending message ${semanticMsg.messageId} (V6A ${byteLen} bytes, V6B seq=${seq}): "${transcript}"`,
+            );
 
-          // Base64-encode the binary packet for the native bridge.
-          // btoa() expects a string of single-byte chars, so convert Uint8Array → string first.
-          let charStr = '';
-          for (let i = 0; i < encoded.length; i++) {
-            charStr += String.fromCharCode(encoded[i]);
+            // Single-frame send
+            let charStr = '';
+            for (let i = 0; i < encoded.length; i++) {
+              charStr += String.fromCharCode(encoded[i]);
+            }
+            let base64: string;
+            try {
+              base64 = (globalThis as any).btoa(charStr);
+            } catch {
+              base64 = (globalThis as any).btoa(charStr);
+            }
+
+            setLastSentMessage(semanticMsg);
+            setStatus('SENDING');
+            setSendStatus('idle');
+
+            NativeBLE.send(base64)
+              .then(() => {
+                setSendStatus('sent');
+                setStatus('SENT');
+                setTimeout(() => {
+                  if (enabled) setStatus('WAITING_FOR_SPEECH');
+                }, 1500);
+              })
+              .catch((err: any) => {
+                setSendStatus('failed');
+                setVoiceError(`Send failed: ${err.message || err}`);
+                setStatus('ERROR');
+              });
+          } else {
+            // Multi-frame: send each V7 fragment as a separate V6B frame
+            console.log(
+              `[BLE Voice] Sending fragmented message ${semanticMsg.messageId} (V6A ${byteLen} bytes, ${fragments.length} fragments): "${transcript}"`,
+            );
+
+            setLastSentMessage(semanticMsg);
+            setStatus('SENDING');
+            setSendStatus('idle');
+
+            // Send each fragment sequentially
+            const sendFragment = async (index: number): Promise<void> => {
+              if (index >= fragments.length) return;
+              const chunk = fragments[index];
+              const seq = seqManagerRef.current.nextSequence();
+              const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, chunk.payload);
+
+              let charStr = '';
+              for (let i = 0; i < encoded.length; i++) {
+                charStr += String.fromCharCode(encoded[i]);
+              }
+              let base64: string;
+              try {
+                base64 = (globalThis as any).btoa(charStr);
+              } catch {
+                base64 = (globalThis as any).btoa(charStr);
+              }
+
+              await NativeBLE.send(base64);
+              await sendFragment(index + 1);
+            };
+
+            sendFragment(0)
+              .then(() => {
+                setSendStatus('sent');
+                setStatus('SENT');
+                setTimeout(() => {
+                  if (enabled) setStatus('WAITING_FOR_SPEECH');
+                }, 1500);
+              })
+              .catch((err: any) => {
+                setSendStatus('failed');
+                setVoiceError(`Send failed: ${err.message || err}`);
+                setStatus('ERROR');
+              });
           }
-          let base64: string;
-          try {
-            base64 = (globalThis as any).btoa(charStr);
-          } catch {
-            base64 = (globalThis as any).btoa(charStr);
-          }
-
-          NativeBLE.send(base64)
-            .then(() => {
-              setSendStatus('sent');
-              setStatus('SENT');
-              setTimeout(() => {
-                if (enabled) setStatus('WAITING_FOR_SPEECH');
-              }, 1500);
-            })
-            .catch((err: any) => {
-              setSendStatus('failed');
-              setVoiceError(`Send failed: ${err.message || err}`);
-              setStatus('ERROR');
-            });
         });
       }
     });
@@ -184,7 +242,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         const firstByte = rawData[0];
 
         if (firstByte === V6B_VERSION) {
-          // V6B transport envelope → unwrap → V6A decode
+          // V6B transport envelope → unwrap
           const frame = v6bDecode(rawData);
           if (frame.frameType === V6B_FRAME_V6A_MESSAGE) {
             // Validate sequence (detect gaps/duplicates, but still process)
@@ -198,7 +256,32 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             if (seqResult.gap) {
               console.log(`[BLE Voice] Sequence gap detected: ${frame.sequence} from ${event.fromDevice}`);
             }
-            semanticMsg = decodeWithFallback(frame.payload);
+
+            // Check V6B payload for V7 fragmentation marker
+            if (frame.payload.length > 0 && frame.payload[0] === V7_MARKER) {
+              // V7 fragment → parse header, pass to reassembler
+              try {
+                const header = parseHeader(frame.payload);
+                const v6aChunk = frame.payload.slice(V7_HEADER_SIZE);
+                const result = reassemblerRef.current.addFragment(
+                  event.fromDevice,
+                  header,
+                  v6aChunk,
+                );
+
+                if (result.status === 'complete') {
+                  semanticMsg = decodeWithFallback(result.v6aPacket);
+                } else if (result.status === 'error') {
+                  console.warn(`[BLE Voice] V7 reassembly error: ${result.reason}`);
+                }
+                // else: incomplete — wait for more fragments
+              } catch (e: any) {
+                console.warn(`[BLE Voice] V7 fragment parse error: ${e.message}`);
+              }
+            } else {
+              // Single-frame V6A (no V7 header)
+              semanticMsg = decodeWithFallback(frame.payload);
+            }
           }
         } else if (firstByte === 0x02) {
           // V6A binary (no V6B envelope) — backward compatibility
@@ -320,6 +403,22 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       if (isMutedRef.current) {
         NativeSTT.unmuteMic();
         isMutedRef.current = false;
+      }
+    };
+  }, [enabled]);
+
+  // ── V7 reassembly cleanup timer ──────────────────────────────────
+
+  useEffect(() => {
+    if (enabled) {
+      cleanupTimerRef.current = setInterval(() => {
+        reassemblerRef.current.cleanup();
+      }, 10_000);
+    }
+    return () => {
+      if (cleanupTimerRef.current) {
+        clearInterval(cleanupTimerRef.current);
+        cleanupTimerRef.current = null;
       }
     };
   }, [enabled]);
