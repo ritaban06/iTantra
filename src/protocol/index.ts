@@ -129,5 +129,6 @@ export type {
 } from './ReliabilityTypes';
 
 export { ReliabilityManager } from './ReliabilityManager';
+export type { SendResult } from './ReliabilityManager';
 export { DeliveredMessageCache } from './DeliveredMessageCache';
 export { CompletedGroupCache } from './CompletedGroupCache';
