@@ -97,3 +97,37 @@ export {
 } from './FragmentCodec';
 
 export { Reassembler } from './Reassembler';
+
+// ── V8 Reliable Delivery ────────────────────────────────────────
+
+export {
+  ACK_TIMEOUT_MS,
+  MAX_RETRIES,
+  PENDING_EXPIRY_MS,
+  DELIVERED_CACHE_MAX,
+  DELIVERED_CACHE_RETENTION_MS,
+  COMPLETED_CACHE_MAX,
+  COMPLETED_CACHE_RETENTION_MS,
+  MAX_QUEUED_MESSAGES,
+  MAX_NACKS_PER_SECOND,
+  NACK_PAYLOAD_SIZE,
+  ACK_PAYLOAD_SIZE,
+  NACK_REASON_MALFORMED_FRAME,
+  NACK_REASON_INVALID_FRAGMENT,
+  NACK_REASON_METADATA_CONFLICT,
+  NACK_REASON_REASSEMBLY_EXPIRED,
+  NACK_REASON_UNSUPPORTED_PROTOCOL,
+} from './ReliabilityTypes';
+
+export type {
+  SenderState,
+  ReceiverState,
+  PendingMessage,
+  ReliabilityEvent,
+  DeliveredEntry,
+  CompletedGroupEntry,
+} from './ReliabilityTypes';
+
+export { ReliabilityManager } from './ReliabilityManager';
+export { DeliveredMessageCache } from './DeliveredMessageCache';
+export { CompletedGroupCache } from './CompletedGroupCache';

@@ -17,12 +17,17 @@ import {
   SequenceManager,
   SequenceValidator,
   V6B_FRAME_V6A_MESSAGE,
+  V6B_FRAME_ACK,
+  V6B_FRAME_NACK,
   V6B_VERSION,
   splitV6A,
   parseHeader,
   Reassembler,
   V7_MARKER,
   V7_HEADER_SIZE,
+  ReliabilityManager,
+  DeliveredMessageCache,
+  CompletedGroupCache,
 } from '../protocol';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
@@ -90,6 +95,78 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   const reassemblerRef = useRef(new Reassembler());
   const cleanupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // V8 reliability state
+  const deliveredCacheRef = useRef(new DeliveredMessageCache());
+  const completedGroupCacheRef = useRef(new CompletedGroupCache());
+  const reliabilityManagerRef = useRef<ReliabilityManager | null>(null);
+
+  /** Helper: send a V6B frame over BLE. */
+  const sendV6BFrame = useCallback(async (frame: Uint8Array): Promise<void> => {
+    let charStr = '';
+    for (let i = 0; i < frame.length; i++) {
+      charStr += String.fromCharCode(frame[i]);
+    }
+    let base64: string;
+    try {
+      base64 = (globalThis as any).btoa(charStr);
+    } catch {
+      base64 = (globalThis as any).btoa(charStr);
+    }
+    await NativeBLE.send(base64);
+  }, []);
+
+  /** Helper: send the initial DATA frames for a PendingMessage (single or fragmented). */
+  const sendInitialData = useCallback(async (msg: import('../protocol').PendingMessage): Promise<void> => {
+    if (msg.fragments.length === 0) {
+      // Single-frame: build one V6B DATA frame
+      const seq = seqManagerRef.current.nextSequence();
+      const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, msg.v6aPacket);
+      await sendV6BFrame(encoded);
+    } else {
+      // Fragmented: send each V7 fragment as a separate V6B DATA frame
+      for (let i = 0; i < msg.payloads.length; i++) {
+        const seq = seqManagerRef.current.nextSequence();
+        const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, msg.payloads[i]);
+        await sendV6BFrame(encoded);
+      }
+    }
+    // After all DATA frames sent, start the ACK retry timer.
+    reliabilityManagerRef.current?.onFrameSent();
+  }, [sendV6BFrame]);
+
+  /** Helper: get or create per-peer ReliabilityManager. */
+  const getOrCreateReliabilityManager = useCallback((): ReliabilityManager => {
+    if (!reliabilityManagerRef.current) {
+      const mgr = new ReliabilityManager('local', seqManagerRef.current);
+      mgr.setSendFn(async (frame: Uint8Array) => {
+        await sendV6BFrame(frame);
+      });
+      mgr.setOnEvent((event) => {
+        if (event.type === 'TIMEOUT_RETRY') {
+          console.log(`[BLE Voice] Retransmitting (timeout): ${event.messageId}`);
+        } else if (event.type === 'NACK_RECEIVED') {
+          console.log(`[BLE Voice] Retransmitting (NACK reason=0x${event.reason?.toString(16)}): ${event.messageId}`);
+        } else if (event.type === 'MAX_RETRIES') {
+          console.warn(`[BLE Voice] Delivery failed after retries: ${event.messageId}`);
+          setVoiceError(`Message delivery failed after retries: ${event.messageId}`);
+        } else if (event.type === 'ACK_RECEIVED') {
+          console.log(`[BLE Voice] ACK received: ${event.messageId}`);
+        } else if (event.type === 'CANCELLED') {
+          console.log(`[BLE Voice] Reliability cancelled: ${event.messageId}`);
+        }
+      });
+      // When a queued message is promoted, send its DATA frames.
+      mgr.setOnPromote((promotedMsg) => {
+        console.log(`[BLE Voice] Queued message promoted: ${promotedMsg.messageId}`);
+        sendInitialData(promotedMsg).catch((err: any) => {
+          console.warn(`[BLE Voice] Promoted message send failed: ${err}`);
+        });
+      });
+      reliabilityManagerRef.current = mgr;
+    }
+    return reliabilityManagerRef.current;
+  }, [sendV6BFrame, sendInitialData]);
+
   // Keep languageCode ref current for event handlers.
   languageCodeRef.current = languageCode;
 
@@ -124,32 +201,33 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
           // V7 fragmentation: split if V6A exceeds V6B payload limit
           const fragments = splitV6A(v6aEncoded);
 
-          if (fragments.length === 0) {
-            // Single-frame: V6A fits in V6B directly (≤ 499 bytes)
-            const seq = seqManagerRef.current.nextSequence();
-            const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, v6aEncoded);
+          console.log(
+            fragments.length === 0
+              ? `[BLE Voice] Sending message ${semanticMsg.messageId} (V6A ${byteLen} bytes): "${transcript}"`
+              : `[BLE Voice] Sending fragmented message ${semanticMsg.messageId} (V6A ${byteLen} bytes, ${fragments.length} fragments): "${transcript}"`,
+          );
 
-            console.log(
-              `[BLE Voice] Sending message ${semanticMsg.messageId} (V6A ${byteLen} bytes, V6B seq=${seq}): "${transcript}"`,
-            );
+          setLastSentMessage(semanticMsg);
+          setStatus('SENDING');
+          setSendStatus('idle');
 
-            // Single-frame send
-            let charStr = '';
-            for (let i = 0; i < encoded.length; i++) {
-              charStr += String.fromCharCode(encoded[i]);
-            }
-            let base64: string;
-            try {
-              base64 = (globalThis as any).btoa(charStr);
-            } catch {
-              base64 = (globalThis as any).btoa(charStr);
-            }
+          // V8: register with reliability manager
+          const mgr = getOrCreateReliabilityManager();
+          const result = mgr.send({
+            messageId: semanticMsg.messageId,
+            v6aPacket: v6aEncoded,
+            groupId: fragments.length > 0 ? fragments[0].header.groupId : 0,
+            fragments: fragments.map(f => f.payload),
+            payloads: fragments.map(f => f.payload),
+          });
 
-            setLastSentMessage(semanticMsg);
-            setStatus('SENDING');
-            setSendStatus('idle');
+          if (fragments.length > 0) {
+            mgr.registerGroupId(fragments[0].header.groupId, semanticMsg.messageId);
+          }
 
-            NativeBLE.send(base64)
+          if (result.active) {
+            // Message became active — send DATA frames now.
+            sendInitialData(result.message)
               .then(() => {
                 setSendStatus('sent');
                 setStatus('SENT');
@@ -163,50 +241,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
                 setStatus('ERROR');
               });
           } else {
-            // Multi-frame: send each V7 fragment as a separate V6B frame
-            console.log(
-              `[BLE Voice] Sending fragmented message ${semanticMsg.messageId} (V6A ${byteLen} bytes, ${fragments.length} fragments): "${transcript}"`,
-            );
-
-            setLastSentMessage(semanticMsg);
-            setStatus('SENDING');
-            setSendStatus('idle');
-
-            // Send each fragment sequentially
-            const sendFragment = async (index: number): Promise<void> => {
-              if (index >= fragments.length) return;
-              const chunk = fragments[index];
-              const seq = seqManagerRef.current.nextSequence();
-              const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, chunk.payload);
-
-              let charStr = '';
-              for (let i = 0; i < encoded.length; i++) {
-                charStr += String.fromCharCode(encoded[i]);
-              }
-              let base64: string;
-              try {
-                base64 = (globalThis as any).btoa(charStr);
-              } catch {
-                base64 = (globalThis as any).btoa(charStr);
-              }
-
-              await NativeBLE.send(base64);
-              await sendFragment(index + 1);
-            };
-
-            sendFragment(0)
-              .then(() => {
-                setSendStatus('sent');
-                setStatus('SENT');
-                setTimeout(() => {
-                  if (enabled) setStatus('WAITING_FOR_SPEECH');
-                }, 1500);
-              })
-              .catch((err: any) => {
-                setSendStatus('failed');
-                setVoiceError(`Send failed: ${err.message || err}`);
-                setStatus('ERROR');
-              });
+            // Message was queued — do NOT send DATA frames.
+            // onPromote callback will fire when it's this message's turn.
+            console.log(`[BLE Voice] Message ${semanticMsg.messageId} queued (active message pending)`);
           }
         });
       }
@@ -244,6 +281,23 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         if (firstByte === V6B_VERSION) {
           // V6B transport envelope → unwrap
           const frame = v6bDecode(rawData);
+
+          // V8: intercept ACK/NACK before DATA processing
+          if (frame.frameType === V6B_FRAME_ACK) {
+            const ackMsgId = ReliabilityManager.parseAckPayload(frame.payload);
+            if (ackMsgId) {
+              reliabilityManagerRef.current?.handleAck(ackMsgId);
+            }
+            return; // ACK is control — stop processing
+          }
+          if (frame.frameType === V6B_FRAME_NACK) {
+            const nackData = ReliabilityManager.parseNackPayload(frame.payload);
+            if (nackData) {
+              reliabilityManagerRef.current?.handleNack(nackData.groupId, nackData.reason);
+            }
+            return; // NACK is control — stop processing
+          }
+
           if (frame.frameType === V6B_FRAME_V6A_MESSAGE) {
             // Validate sequence (detect gaps/duplicates, but still process)
             const seqResult = seqValidatorRef.current.validate(
@@ -259,28 +313,101 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
             // Check V6B payload for V7 fragmentation marker
             if (frame.payload.length > 0 && frame.payload[0] === V7_MARKER) {
-              // V7 fragment → parse header, pass to reassembler
+              // V7 fragment → parse header
               try {
                 const header = parseHeader(frame.payload);
-                const v6aChunk = frame.payload.slice(V7_HEADER_SIZE);
-                const result = reassemblerRef.current.addFragment(
-                  event.fromDevice,
-                  header,
-                  v6aChunk,
-                );
 
-                if (result.status === 'complete') {
-                  semanticMsg = decodeWithFallback(result.v6aPacket);
-                } else if (result.status === 'error') {
-                  console.warn(`[BLE Voice] V7 reassembly error: ${result.reason}`);
+                // V8: check CompletedGroupCache BEFORE Reassembler
+                // Prevents re-creating reassembly state for already-completed groups.
+                const cachedMsgId = completedGroupCacheRef.current.getCompletedMessageId(
+                  event.fromDevice,
+                  header.groupId,
+                );
+                if (cachedMsgId) {
+                  // Group already completed — re-send ACK using cached messageId, no TTS
+                  const ackPayload = ReliabilityManager.buildAckPayload(cachedMsgId);
+                  const ackFrame = v6bEncode(
+                    seqManagerRef.current.nextSequence(),
+                    V6B_FRAME_ACK,
+                    ackPayload,
+                  );
+                  sendV6BFrame(ackFrame).catch(() => {});
+                  console.log(`[BLE Voice] Completed group ${header.groupId} — re-ACKed, skipped reassembly`);
+                } else {
+                  // Group not yet completed — pass to Reassembler
+                  const v6aChunk = frame.payload.slice(V7_HEADER_SIZE);
+                  const result = reassemblerRef.current.addFragment(
+                    event.fromDevice,
+                    header,
+                    v6aChunk,
+                  );
+
+                  if (result.status === 'complete') {
+                    semanticMsg = decodeWithFallback(result.v6aPacket);
+                    // V8: semantic deduplication for V7
+                    if (semanticMsg) {
+                      const msgId = semanticMsg.messageId;
+                      const groupId = header.groupId;
+
+                      if (deliveredCacheRef.current.isDelivered(event.fromDevice, msgId)) {
+                        // MessageId already delivered — re-send ACK, block TTS
+                        const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+                        const ackFrame = v6bEncode(
+                          seqManagerRef.current.nextSequence(),
+                          V6B_FRAME_ACK,
+                          ackPayload,
+                        );
+                        sendV6BFrame(ackFrame).catch(() => {});
+                        semanticMsg = null; // block TTS
+                      } else {
+                        // New delivery — mark delivered, store completed group, send ACK
+                        deliveredCacheRef.current.markDelivered(event.fromDevice, msgId);
+                        completedGroupCacheRef.current.store(event.fromDevice, groupId, msgId);
+                        const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+                        const ackFrame = v6bEncode(
+                          seqManagerRef.current.nextSequence(),
+                          V6B_FRAME_ACK,
+                          ackPayload,
+                        );
+                        sendV6BFrame(ackFrame).catch(() => {});
+                      }
+                    }
+                  } else if (result.status === 'error') {
+                    console.warn(`[BLE Voice] V7 reassembly error: ${result.reason}`);
+                  }
+                  // else: incomplete — wait for more fragments
                 }
-                // else: incomplete — wait for more fragments
               } catch (e: any) {
                 console.warn(`[BLE Voice] V7 fragment parse error: ${e.message}`);
               }
             } else {
               // Single-frame V6A (no V7 header)
               semanticMsg = decodeWithFallback(frame.payload);
+              // V8: semantic deduplication for single-frame
+              if (semanticMsg) {
+                const msgId = semanticMsg.messageId;
+                if (deliveredCacheRef.current.isDelivered(event.fromDevice, msgId)) {
+                  // Already delivered — re-send ACK, block TTS
+                  const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+                  const ackFrame = v6bEncode(
+                    seqManagerRef.current.nextSequence(),
+                    V6B_FRAME_ACK,
+                    ackPayload,
+                  );
+                  sendV6BFrame(ackFrame).catch(() => {});
+                  semanticMsg = null; // block TTS
+                } else {
+                  // New delivery — mark delivered, send ACK
+                  deliveredCacheRef.current.markDelivered(event.fromDevice, msgId);
+                  const ackPayload = ReliabilityManager.buildAckPayload(msgId);
+                  const ackFrame = v6bEncode(
+                    seqManagerRef.current.nextSequence(),
+                    V6B_FRAME_ACK,
+                    ackPayload,
+                  );
+                  sendV6BFrame(ackFrame).catch(() => {});
+                }
+              }
             }
           }
         } else if (firstByte === 0x02) {
@@ -377,6 +504,8 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         setVoiceError('Connection lost');
         setStatus('ERROR');
         setEnabled(false);
+        // V8: clear reliability state
+        reliabilityManagerRef.current?.cancel();
         // Unmute if muted.
         if (isMutedRef.current) {
           NativeSTT.unmuteMic();
