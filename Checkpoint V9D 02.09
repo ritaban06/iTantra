@@ -1,0 +1,876 @@
+# Checkpoint V9D — Current iTantra Communication Stack
+
+This checkpoint explains the current iTantra codebase from **V6A through V9D** in simple terms. The main goal is to describe what is currently implemented and how all the pieces fit together.
+
+---
+
+# 1. V6A — Binary Semantic Message Protocol
+
+V6A defines the actual **meaning of an iTantra message**.
+
+Instead of sending a large JSON object, iTantra converts a speech result into a compact binary message containing information such as:
+
+* message ID
+* text
+* language
+* emotion
+* emotion confidence
+* voice profile
+
+The protocol also provides default values, so a message can still be represented when emotion information is unavailable.
+
+A message is encoded into a compact binary format before being passed to the transport system.
+
+### In simple terms
+
+I can think of V6A as the **language of the message itself**.
+
+```text
+Speech recognized
+-> Text
+-> Language / message information
+-> V6A binary message
+```
+
+---
+
+# 2. V6B — Transport Framing and Sequencing
+
+V6B adds a transport frame around the data.
+
+Its job is to identify:
+
+* what type of transport packet this is
+* the sequence number
+* the payload length
+* the actual payload
+
+This lets the receiving side distinguish transport packets and detect ordering/duplicate situations.
+
+The important idea is that the **V6B sequence number belongs to the transport hop**, not to the logical message itself.
+
+```text
+V6A message
+-> V6B transport frame
+-> sequence number
+-> payload
+```
+
+---
+
+# 3. V7 — Fragmentation and Reassembly
+
+Bluetooth packets have limited space, so a large V6A message cannot always fit inside one transport packet.
+
+V7 solves this by splitting a large payload into multiple fragments.
+
+Each fragment belongs to the same fragment group and contains enough information for the receiver to rebuild the original message.
+
+Fragments can arrive out of order and are reassembled when the complete set is available.
+
+### In simple terms
+
+```text
+Large V6A message
+-> split into fragments
+-> fragment 1
+-> fragment 2
+-> fragment 3
+-> ...
+-> receiver collects fragments
+-> original V6A message
+```
+
+Small messages can continue without fragmentation.
+
+---
+
+# 4. V8 — BLE Transport Reliability
+
+V8 is responsible for making the **individual Bluetooth link reliable**.
+
+It provides:
+
+* ACK
+* NACK
+* retransmission
+* retry limits
+* timeout handling
+* transport sequence handling
+* duplicate handling
+
+The important concept is that V8 reliability is **per BLE connection**.
+
+For example:
+
+```text
+Phone A
+-> Bluetooth link
+-> Phone B
+```
+
+has its own transport reliability.
+
+In a mesh:
+
+```text
+A -> B
+B -> C
+C -> D
+```
+
+each Bluetooth hop is treated as its own transport link.
+
+```text
+A <-> B
+-> V8 reliability
+
+B <-> C
+-> V8 reliability
+
+C <-> D
+-> V8 reliability
+```
+
+---
+
+# 5. V8 and the Voice Pipeline
+
+The existing voice system connects speech recognition to the transport system.
+
+The basic flow is:
+
+```text
+Microphone
+-> local STT
+-> recognized text
+-> V6A message
+-> transport
+```
+
+At the receiving side:
+
+```text
+Received message
+-> decode
+-> text
+-> TTS
+-> speaker
+```
+
+The system also handles the voice feedback problem so that received speech is not immediately re-captured by the microphone while it is being played.
+
+This allows iTantra to behave more like a **push-to-talk voice communication system**, while transmitting text rather than raw audio.
+
+```text
+Phone A speaks
+-> STT
+-> text message
+-> Bluetooth
+-> Phone B
+-> TTS
+-> Phone B hears speech
+```
+
+---
+
+# 6. Why the system sends text instead of raw audio
+
+The important design idea is that iTantra does not need to transmit continuous speech audio across the network.
+
+Instead:
+
+```text
+Voice
+-> STT
+-> Text
+-> Network
+-> Text
+-> TTS
+-> Voice
+```
+
+This makes the transmitted information much smaller than sending the original audio stream.
+
+The network therefore transports the **meaning of the speech**, while speech generation happens at the receiving device.
+
+---
+
+# 7. BITCHAT — Network Layer
+
+V9 introduced a separate networking layer called **BITCHAT**.
+
+BITCHAT sits above the existing BLE transport.
+
+Its job is no longer simply:
+
+> “Send this packet to my directly connected Bluetooth device.”
+
+Instead, it answers:
+
+> “How can this packet travel through a network of participating phones?”
+
+The BITCHAT layer contains concepts such as:
+
+* node identity
+* packet identity
+* destination identity
+* TTL
+* peer information
+* deduplication
+* relay behavior
+* flooding
+* mesh discovery
+
+```text
+Application message
+-> BITCHAT network
+-> one or more BLE hops
+-> destination
+```
+
+---
+
+# 8. BITCHAT Node ID
+
+Every iTantra mesh node has a BITCHAT **Node ID**.
+
+This identifies the device within the mesh.
+
+The Node ID is different from the Bluetooth transport sequence number.
+
+```text
+Node ID
+-> identifies the phone/node
+
+V6B sequence
+-> identifies a transport packet on a BLE hop
+```
+
+The Node ID is used for mesh-level identity.
+
+---
+
+# 9. BITCHAT Packet Identity
+
+Every BITCHAT packet has:
+
+* source Node ID
+* destination Node ID
+* packet ID
+* TTL
+* packet type
+* payload
+
+The important thing is that the BITCHAT identity stays the same while a packet travels through the mesh.
+
+For example:
+
+```text
+A -> B -> C -> D -> F
+```
+
+The BITCHAT packet can continue to represent:
+
+```text
+source = A
+destination = F
+packet = X
+```
+
+at every hop.
+
+---
+
+# 10. BITCHAT Destination ID
+
+V9C added a destination Node ID to the BITCHAT packet.
+
+This allows the network to distinguish between:
+
+```text
+"This packet is for me"
+```
+
+and:
+
+
+"This packet is passing through me"
+```
+
+For a unicast message:
+
+
+Source = A
+Destination = F
+```
+
+the path can look like:
+
+
+A
+-> B
+-> C
+-> D
+-> F
+```
+
+B, C and D forward the packet.
+
+F is the node that delivers the message to the local voice application.
+
+```text
+A -> B -> C -> D -> F
+              relay -> destination
+```
+
+---
+
+# 11. TTL — Controlling How Far Packets Travel
+
+BITCHAT packets have a TTL value.
+
+Each relay reduces the TTL.
+
+This prevents packets from continuing through the network indefinitely.
+
+For example:
+
+```text
+A
+-> B   TTL decreases
+-> C   TTL decreases
+-> D   TTL decreases
+-> F
+```
+
+When TTL reaches its limit, the packet is no longer forwarded.
+
+```text
+TTL
+-> limits packet lifetime
+-> prevents endless forwarding
+```
+
+---
+
+# 12. Deduplication
+
+In a mesh, the same packet can reach a phone through multiple paths.
+
+For example:
+
+```text
+        B
+       / \
+      /   \
+A -> C     D -> F
+      \   /
+       \ /
+        E
+```
+
+The same BITCHAT packet may arrive through different paths.
+
+The packet identity lets the node recognize:
+
+> “I have already seen this packet.”
+
+The duplicate is then ignored instead of being forwarded again.
+
+
+Packet X arrives
+-> not seen
+-> process
+-> forward
+
+Packet X arrives again
+-> already seen
+-> drop duplicate
+```
+
+This prevents flooding from becoming an endless loop.
+
+---
+
+# 13. Peer Registry
+
+BITCHAT maintains information about the phones that are **directly connected through BLE**.
+
+A direct peer means:
+
+
+My phone
+<-> Bluetooth connection
+<-> another phone
+```
+
+The peer registry tracks the state of these direct relationships.
+
+The states include:
+
+
+DISCOVERED
+-> CONNECTED
+-> STALE
+```
+
+This is about **direct BLE neighbors**, not every phone somewhere in the mesh.
+
+---
+
+# 14. ANNOUNCE — Direct Neighbor Identity
+
+ANNOUNCE is used to identify a **direct BLE neighbor**.
+
+For example:
+
+
+A <-> B
+```
+
+A sends an ANNOUNCE saying:
+
+```text
+"I am Node A."
+```
+
+B then knows:
+
+```text
+This BLE connection corresponds to Node A.
+```
+
+Similarly, B can announce itself to A.
+
+ANNOUNCE is intentionally **not a mesh-flooded message**.
+
+```text
+A <-> B
+ANNOUNCE
+-> direct relationship only
+```
+
+It is not:
+
+```text
+A -> B -> C
+ANNOUNCE
+```
+
+because C must not mistakenly believe that the BLE connection to B belongs to A.
+
+---
+
+# 15. Mesh Relay
+
+V9B introduced the actual BITCHAT relay engine.
+
+A node can receive a packet and forward it to other connected peers.
+
+The general behavior is:
+
+```text
+Receive
+-> validate
+-> check duplicate
+-> process locally when appropriate
+-> reduce TTL
+-> forward to eligible peers
+```
+
+The sender that delivered the packet can be excluded from the immediate forwarding decision to avoid unnecessary back-and-forth.
+
+This gives us a controlled flooding mesh rather than a fixed route.
+
+```text
+A
+-> B
+-> C
+-> D
+-> F
+```
+
+The network does not need to maintain one permanent path for the packet.
+
+---
+
+# 16. V9C — BLE and BITCHAT Integration
+
+V9C connected the BITCHAT network layer to the existing BLE/V8 transport.
+
+The architecture is now:
+
+```text
+BITCHAT packet
+-> V6B transport frame
+-> BLE/V8
+-> another phone
+```
+
+When a BITCHAT packet is forwarded, the BITCHAT identity stays the same, while the V6B transport sequence is appropriate for the new BLE hop.
+
+Therefore:
+
+```text
+BITCHAT identity
+-> remains the same across mesh
+
+V6B sequence
+-> changes for each transport hop
+```
+
+---
+
+# 17. Per-Hop Transport in the Mesh
+
+The transport hierarchy is therefore:
+
+```text
+A
+-> BLE/V8
+-> B
+-> BLE/V8
+-> C
+-> BLE/V8
+-> D
+-> BLE/V8
+-> F
+```
+
+while the network packet remains:
+
+```text
+source = A
+destination = F
+packet = X
+```
+
+This keeps the **mesh network layer** separate from the **BLE transport layer**.
+
+---
+
+# 18. Relay vs Destination
+
+The destination field makes it possible to distinguish:
+
+```text
+Relay node
+-> forward packet
+-> do not deliver it to the voice application
+```
+
+from:
+
+```text
+Destination node
+-> recognize its own Node ID
+-> deliver packet
+-> decode message
+-> TTS
+```
+
+For:
+
+```text
+A -> B -> C -> F
+```
+
+the intended behavior is:
+
+```text
+A
+-> send
+
+B
+-> relay
+
+C
+-> relay
+
+F
+-> receive
+-> decode
+-> TTS
+```
+
+---
+
+# 19. V9D — Mesh-Wide Node Discovery
+
+V9D adds a separate **mesh discovery mechanism**.
+
+ANNOUNCE tells a phone:
+
+> “This directly connected BLE peer is Node X.”
+
+DISCOVERY tells the mesh:
+
+> “Node X exists somewhere in the mesh.”
+
+These are deliberately different.
+
+
+ANNOUNCE
+-> direct neighbor identity
+
+DISCOVERY
+-> mesh-wide node discovery
+```
+
+---
+
+# 20. DISCOVERY Packets
+
+A DISCOVERY packet contains the identity of the node being advertised.
+
+The discovery information is small:
+
+```text
+advertised Node ID
+-> discovery version
+```
+
+The packet itself travels through the BITCHAT mesh.
+
+Therefore:
+
+```text
+F
+-> DISCOVERY
+-> B
+-> C
+-> A
+```
+
+A can eventually learn:
+
+```text
+Node F exists
+```
+
+even when F is not directly connected to A.
+
+---
+
+# 21. Mesh Discovery Registry
+
+The discovered Node IDs are stored separately from direct BLE peers.
+
+This gives us two different types of information:
+
+### Direct peer information
+
+```text
+BLE connection
+-> directly connected Node ID
+```
+
+### Mesh discovery information
+
+```text
+Node ID
+-> known to exist somewhere in the mesh
+```
+
+A remotely discovered node is **not treated as a direct Bluetooth peer**.
+
+```text
+A discovers F
+-> A knows F exists
+-> F is NOT considered A's direct BLE peer
+```
+
+---
+
+# 22. Discovery Expiration
+
+Discovery information is temporary.
+
+A discovered node is stored for a limited period and can be refreshed when rediscovered.
+
+The registry is also bounded so it cannot grow indefinitely.
+
+In simple terms:
+
+```text
+Node discovered
+-> stored
+
+Node discovered again
+-> refresh information
+
+Node not seen for long enough
+-> expires
+```
+
+---
+
+# 23. Discovery vs Routing
+
+The current mesh knows:
+
+```text
+"Node F exists."
+```
+
+It does **not** maintain a permanent route such as:
+
+
+F -> D -> C -> B
+
+
+That distinction is important.
+
+The current architecture uses:
+
+```text
+Node discovery
++
+destination identity
++
+controlled flooding
+```
+
+rather than a traditional routing table.
+
+---
+
+# 24. Advisory Hop Count
+
+The discovery registry may store an approximate hop count as metadata.
+
+For example:
+
+```text
+Node F
+-> hopCount = 2
+```
+
+This is only advisory information.
+
+It is **not** used as:
+
+```text
+routing information
+destination selection
+relay selection
+delivery logic
+```
+
+So:
+
+```text
+hopCount
+-> informational metadata only
+```
+
+---
+
+# 25. Current End-to-End Concept
+
+Putting all the implemented parts together, the current communication system works conceptually like this:
+
+```text
+Phone A
+-> iTantra STT
+-> V6A semantic message
+-> V7 fragmentation when required
+-> BITCHAT packet
+-> destination Node ID
+-> V6B transport frame
+-> V8 BLE transport
+-> Bluetooth
+-> Phone B
+-> BITCHAT relay
+-> V6B/V8
+-> Bluetooth
+-> Phone C
+-> BITCHAT relay
+-> V6B/V8
+-> Bluetooth
+-> ...
+-> Destination Phone F
+-> BITCHAT destination check
+-> V7 reassembly when required
+-> V6A decoding
+-> text
+-> iTantra TTS
+-> speaker
+```
+
+---
+
+# Current iTantra System
+
+The complete system currently implemented can be visualized as:
+
+```text
+PHONE A
+-> iTantra Software
+-> Microphone
+-> Local STT
+-> V6A Semantic Message
+-> V7 Fragmentation if required
+-> BITCHAT Network Packet
+-> Source Node ID
+-> Destination Node ID
+-> Packet ID + TTL + Deduplication
+-> V6B Transport Frame
+-> V8 BLE Reliability
+-> Bluetooth LE
+-> PHONE B
+-> iTantra BITCHAT Relay
+-> V6B / V8
+-> Bluetooth LE
+-> PHONE C
+-> iTantra BITCHAT Relay
+-> V6B / V8
+-> Bluetooth LE
+-> ... any participating relay phones ...
+-> Bluetooth LE
+-> DESTINATION PHONE F
+-> iTantra BITCHAT Destination
+-> V7 Reassembly if required
+-> V6A Semantic Message
+-> Text
+-> Local TTS
+-> Speaker
+```
+
+### In one simple picture
+
+
+        iTantra Mesh over Bluetooth LE
+
+PHONE A
+-> iTantra
+-> STT
+-> V6A
+-> V7
+-> BITCHAT
+-> V6B
+-> V8
+-> Bluetooth
+        ↓
+PHONE B
+-> BITCHAT Relay
+-> V6B
+-> V8
+-> Bluetooth
+        ↓
+PHONE C
+-> BITCHAT Relay
+-> V6B
+-> V8
+-> Bluetooth
+        ↓
+      ........
+        ↓
+PHONE F
+-> BITCHAT Destination
+-> V7
+-> V6A
+-> TTS
+-> Speaker
+
