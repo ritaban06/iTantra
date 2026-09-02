@@ -12,6 +12,12 @@ import {
   encode as binaryEncode,
   decodeWithFallback,
   getEncodedByteLength as binaryGetEncodedByteLength,
+  v6bEncode,
+  v6bDecode,
+  SequenceManager,
+  SequenceValidator,
+  V6B_FRAME_V6A_MESSAGE,
+  V6B_VERSION,
 } from '../protocol';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
@@ -71,6 +77,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   const isMutedRef = useRef(false);
   const languageCodeRef = useRef(languageCode);
 
+  // V6B transport state
+  const seqManagerRef = useRef(new SequenceManager(0));
+  const seqValidatorRef = useRef(new SequenceValidator());
+
   // Keep languageCode ref current for event handlers.
   languageCodeRef.current = languageCode;
 
@@ -99,11 +109,15 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             language: languageCodeRef.current,
           });
 
-          const encoded = binaryEncode(semanticMsg);
+          const v6aEncoded = binaryEncode(semanticMsg);
           const byteLen = binaryGetEncodedByteLength(semanticMsg);
 
+          // Wrap V6A packet in V6B transport envelope
+          const seq = seqManagerRef.current.nextSequence();
+          const encoded = v6bEncode(seq, V6B_FRAME_V6A_MESSAGE, v6aEncoded);
+
           console.log(
-            `[BLE Voice] Sending message ${semanticMsg.messageId} (${byteLen} bytes): "${transcript}"`,
+            `[BLE Voice] Sending message ${semanticMsg.messageId} (V6A ${byteLen} bytes, V6B seq=${seq}): "${transcript}"`,
           );
 
           setLastSentMessage(semanticMsg);
@@ -151,8 +165,6 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
       if (!decoded.trim()) return;
 
-      // Try to decode as a SemanticMessage (V6A binary or V4 JSON fallback).
-      // The decoded string from atob contains raw bytes as char codes.
       // Convert to Uint8Array for binary detection.
       let rawData: Uint8Array | string;
       try {
@@ -160,16 +172,46 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         for (let i = 0; i < decoded.length; i++) {
           bytes[i] = decoded.charCodeAt(i) & 0xff;
         }
-        // Check if first byte looks like V6A version (0x02) or V4 JSON (0x7B = '{')
-        if (bytes.length > 0 && (bytes[0] === 0x02 || bytes[0] === 0x7b)) {
-          rawData = bytes;
-        } else {
-          rawData = decoded;
-        }
+        rawData = bytes;
       } catch {
         rawData = decoded;
       }
-      const semanticMsg = decodeWithFallback(rawData);
+
+      // ── Protocol detection and decode ─────────────────────────
+      let semanticMsg = null;
+
+      if (rawData instanceof Uint8Array && rawData.length > 0) {
+        const firstByte = rawData[0];
+
+        if (firstByte === V6B_VERSION) {
+          // V6B transport envelope → unwrap → V6A decode
+          const frame = v6bDecode(rawData);
+          if (frame.frameType === V6B_FRAME_V6A_MESSAGE) {
+            // Validate sequence (detect gaps/duplicates, but still process)
+            const seqResult = seqValidatorRef.current.validate(
+              event.fromDevice,
+              frame.sequence,
+            );
+            if (seqResult.duplicate) {
+              console.log(`[BLE Voice] Duplicate sequence ${frame.sequence} from ${event.fromDevice}, still processing`);
+            }
+            if (seqResult.gap) {
+              console.log(`[BLE Voice] Sequence gap detected: ${frame.sequence} from ${event.fromDevice}`);
+            }
+            semanticMsg = decodeWithFallback(frame.payload);
+          }
+        } else if (firstByte === 0x02) {
+          // V6A binary (no V6B envelope) — backward compatibility
+          semanticMsg = decodeWithFallback(rawData);
+        } else if (firstByte === 0x7b) {
+          // V4 JSON — backward compatibility
+          semanticMsg = decodeWithFallback(rawData);
+        }
+        // else: unknown format, semanticMsg remains null
+      } else if (typeof rawData === 'string') {
+        // String input — attempt V4 JSON decode
+        semanticMsg = decodeWithFallback(rawData);
+      }
 
       let text: string;
       let languageDisplay: string;

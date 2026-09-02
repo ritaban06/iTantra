@@ -33,3 +33,36 @@ export {
   validatePacket,
   getEncodedByteLength,
 } from './BinaryMessageCodec';
+
+// ── V6B Transport Envelope ───────────────────────────────────────
+
+export {
+  V6B_VERSION,
+  V6B_FRAME_V6A_MESSAGE,
+  V6B_FRAME_ACK,
+  V6B_FRAME_NACK,
+  V6B_FRAME_PING,
+  V6B_FRAME_PONG,
+  V6B_VALID_FRAME_TYPES,
+  V6B_HEADER_SIZE,
+  V6B_MAX_FRAME_SIZE,
+  V6B_MAX_PAYLOAD_SIZE,
+  V6BFrameError,
+} from './V6BFrameTypes';
+
+export type { V6BDecodedFrame } from './V6BFrameTypes';
+
+export {
+  encode as v6bEncode,
+  decode as v6bDecode,
+  safeDecode as v6bSafeDecode,
+  validateFrame as v6bValidateFrame,
+} from './V6BFrameCodec';
+
+export { SequenceManager } from './SequenceManager';
+
+export {
+  SequenceValidator,
+} from './SequenceValidator';
+
+export type { SequenceValidationResult } from './SequenceValidator';
