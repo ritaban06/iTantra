@@ -63,3 +63,7 @@ export { PeerRegistry } from './peer';
 
 export { TTLManager } from './mesh';
 export { DedupCache } from './mesh';
+export { MeshRouter } from './mesh';
+export type { PeerQuery } from './mesh';
+export { RelayEngine } from './mesh';
+export type { SendToPeerFn, DeliverFn, RelayEngineParams } from './mesh';
