@@ -24,8 +24,15 @@ export const PACKET_TYPE_DATA = 0x01;
 /** ANNOUNCE packet: peer discovery announcement. */
 export const PACKET_TYPE_ANNOUNCE = 0x02;
 
+/**
+ * DISCOVERY packet: mesh-wide node discovery.
+ * Flooded through mesh like DATA. Carries the advertised Node ID.
+ * Does NOT modify direct BLE peer mapping.
+ */
+export const PACKET_TYPE_DISCOVERY = 0x03;
+
 /** Set of recognized packet types for validation. */
-export const VALID_PACKET_TYPES = new Set([PACKET_TYPE_DATA, PACKET_TYPE_ANNOUNCE]);
+export const VALID_PACKET_TYPES = new Set([PACKET_TYPE_DATA, PACKET_TYPE_ANNOUNCE, PACKET_TYPE_DISCOVERY]);
 
 // ── Flags ────────────────────────────────────────────────────────
 
@@ -69,3 +76,22 @@ export const ANNOUNCE_PAYLOAD_SIZE = 9;
 
 /** ANNOUNCE protocol version. */
 export const ANNOUNCE_PROTOCOL_VERSION = 0x01;
+
+// ── DISCOVERY Payload ──────────────────────────────────────────
+
+/**
+ * DISCOVERY payload size:
+ *   advertisedNodeId(8) + discoveryVersion(1) = 9 bytes.
+ */
+export const DISCOVERY_PAYLOAD_SIZE = 9;
+
+/** DISCOVERY protocol version. */
+export const DISCOVERY_PROTOCOL_VERSION = 0x01;
+
+// ── Mesh Discovery Registry ───────────────────────────────────
+
+/** Maximum discovered-node entries. */
+export const DISCOVERY_MAX_ENTRIES = 128;
+
+/** Retention time for discovery records in milliseconds. */
+export const DISCOVERY_RETENTION_MS = 120_000;

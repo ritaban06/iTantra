@@ -18,7 +18,7 @@
 import { normalizeNodeId } from '../core/BitChatPacket';
 import type { BitChatPacket, NodeId } from '../core/BitChatTypes';
 import { safeDecode as bitChatDecode } from '../core/BitChatPacketCodec';
-import { NODE_ID_BROADCAST, PACKET_TYPE_ANNOUNCE } from '../core/BitChatConstants';
+import { NODE_ID_BROADCAST, PACKET_TYPE_ANNOUNCE, PACKET_TYPE_DISCOVERY } from '../core/BitChatConstants';
 import type { MeshRouter } from './MeshRouter';
 import type { DedupCache } from './DedupCache';
 

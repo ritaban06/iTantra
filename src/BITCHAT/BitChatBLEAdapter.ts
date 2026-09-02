@@ -1,28 +1,31 @@
 /**
- * V9C BitChat ↔ BLE Adapter
+ * V9D BitChat ↔ BLE Adapter
  *
  * Integration bridge between the existing BLE transport (V6B/V8)
- * and the BITCHAT mesh layer (V9A/V9B/V9C).
+ * and the BITCHAT mesh layer (V9A/V9B/V9C/V9D).
  *
  * Responsibilities:
  * - Detect incoming BITCHAT packets from BLE data
  * - Route BITCHAT packets through RelayEngine (destination-aware)
- * - Map BLE peer IDs to BITCHAT node IDs via ANNOUNCE exchange
+ * - Map BLE peer IDs to BITCHAT node IDs via direct ANNOUNCE exchange
+ * - Track mesh-discovered nodes via DISCOVERY packets (MeshDiscoveryRegistry)
  * - Originate BITCHAT packets from local payloads (with destinationNodeId)
  * - Forward RelayEngine-eligible packets through V6B/V8
  * - Deliver locally-recovered payloads for application decode
  * - Skip local delivery for self-originated packets (relay-only behavior)
  *
- * V9C changes:
- * - originate() accepts destinationNodeId for unicast delivery
- * - RelayEngine handles destination-aware delivery (only delivered if addressed)
- * - BITCHAT packets are sent through V6B for per-hop transport reliability
+ * V9D changes:
+ * - DISCOVERY packet type for mesh-wide node identity propagation
+ * - MeshDiscoveryRegistry for tracking remote nodes
+ * - DISCOVERY packets flood like DATA but do NOT modify BLE peer mapping
+ * - Discovered Node IDs are usable as destinationNodeId
  *
  * Does NOT:
  * - Import NativeBLE (transport-agnostic)
  * - Redesign V6A/V6B/V7/V8 protocols
  * - Implement link reliability (V8 handles that per hop)
  * - Implement STT/TTS (useBLEVoiceMode handles that)
+ * - Implement routing tables
  */
 
 import { normalizeNodeId } from './core/BitChatPacket';
@@ -33,14 +36,17 @@ import {
   DEFAULT_TTL,
   PACKET_TYPE_DATA,
   PACKET_TYPE_ANNOUNCE,
+  PACKET_TYPE_DISCOVERY,
   FLAGS_NONE,
   NODE_ID_BROADCAST,
 } from './core/BitChatConstants';
 import type { BitChatPacket, NodeId, PacketId } from './core/BitChatTypes';
 import { encodeAnnounce, safeDecodeAnnounce } from './AnnounceCodec';
+import { encodeDiscovery, safeDecodeDiscovery } from './DiscoveryPacketCodec';
 import { RelayEngine } from './mesh/RelayEngine';
 import { MeshRouter } from './mesh/MeshRouter';
 import { DedupCache } from './mesh/DedupCache';
+import { MeshDiscoveryRegistry } from './mesh/MeshDiscoveryRegistry';
 import { PeerRegistry } from './peer/PeerRegistry';
 
 // ── Types ────────────────────────────────────────────────────────
@@ -79,14 +85,16 @@ export class BitChatBLEAdapter {
   readonly meshRouter: MeshRouter;
   readonly relayEngine: RelayEngine;
 
-  /** BLE peer ID ↔ BITCHAT NodeId mapping. */
+  /** V9D: Mesh discovery registry for remote nodes. */
+  readonly discoveryRegistry: MeshDiscoveryRegistry;
+
+  /** BLE peer ID ↔ BITCHAT NodeId mapping (direct BLE connections only). */
   private peerMappings = new Map<string, PeerMapping>();
   private reverseMappings = new Map<NodeId, PeerMapping>();
 
   /**
    * Packet ID of the last originated packet.
-   * Used to suppress local delivery for self-originated packets
-   * (the originator already processed the speech locally).
+   * Used to suppress local delivery for self-originated packets.
    */
   private originatedPacketId: PacketId | null = null;
 
@@ -99,6 +107,7 @@ export class BitChatBLEAdapter {
     this.peerRegistry = new PeerRegistry();
     this.dedupCache = new DedupCache();
     this.meshRouter = new MeshRouter(this.localNodeId, this.peerRegistry);
+    this.discoveryRegistry = new MeshDiscoveryRegistry();
 
     // sendToPeer: maps BITCHAT NodeId → BLE peer ID → bleSend
     const sendToPeer = async (peerId: NodeId, packet: BitChatPacket): Promise<void> => {
@@ -114,13 +123,12 @@ export class BitChatBLEAdapter {
     // deliver: called by RelayEngine for first-seen packets addressed to this node
     const deliver = (packet: BitChatPacket, fromPeerId?: NodeId): void => {
       if (packet.packetType !== PACKET_TYPE_DATA) {
-        return; // ANNOUNCE: consumed at mesh layer, not delivered to application
+        return; // ANNOUNCE/DISCOVERY: consumed at mesh layer, not delivered to application
       }
 
       // Skip local delivery for self-originated packets.
-      // The originator already processed the speech locally (STT → TTS).
       if (this.originatedPacketId !== null && packet.packetId === this.originatedPacketId) {
-        this.originatedPacketId = null; // consumed
+        this.originatedPacketId = null;
         return;
       }
 
@@ -144,8 +152,7 @@ export class BitChatBLEAdapter {
 
   /**
    * Register a BLE peer with its BITCHAT node ID.
-   * Called when a BLE connection is established and the remote peer's
-   * node ID is known (e.g. via an ANNOUNCE exchange).
+   * Called only for DIRECT BLE connections (via ANNOUNCE exchange).
    */
   registerPeer(blePeerId: string, bitchatNodeId: NodeId): void {
     const normalized = normalizeNodeId(bitchatNodeId);
@@ -207,7 +214,7 @@ export class BitChatBLEAdapter {
    * Process a received ANNOUNCE packet.
    * Extracts the remote node ID and registers the peer mapping.
    *
-   * @param announcePayload  The 9-byte ANNOUNCE payload (from inside a BITCHAT packet).
+   * @param announcePayload  The 9-byte ANNOUNCE payload.
    * @param blePeerId        The BLE peer identifier.
    * @returns The remote NodeId if successful, null otherwise.
    */
@@ -220,18 +227,87 @@ export class BitChatBLEAdapter {
     return remoteNodeId;
   }
 
+  // ── DISCOVERY (V9D) ──────────────────────────────────────────
+
+  /**
+   * Create a DISCOVERY BITCHAT packet advertising the local node's identity.
+   * The caller should send the encoded packet over BLE for mesh flooding.
+   *
+   * @returns Encoded DISCOVERY BITCHAT packet.
+   */
+  createDiscoveryPacket(): Uint8Array {
+    const payload = encodeDiscovery(this.localNodeId);
+    const packet: BitChatPacket = {
+      version: PROTOCOL_VERSION,
+      packetType: PACKET_TYPE_DISCOVERY,
+      ttl: DEFAULT_TTL,
+      sourceNodeId: this.localNodeId,
+      destinationNodeId: NODE_ID_BROADCAST,
+      packetId: normalizeNodeId(BigInt(Date.now()) ^ BigInt('0x' + this.localNodeId.slice(2)) ^ BigInt(0xD)),
+      flags: FLAGS_NONE,
+      payload,
+    };
+    return bitChatEncode(packet);
+  }
+
+  /**
+   * Process a received DISCOVERY packet.
+   * Extracts the advertised Node ID and records it in the discovery registry.
+   * Does NOT modify the direct BLE peer mapping.
+   *
+   * @param discoveryPayload  The 9-byte DISCOVERY payload.
+   * @param fromPeerId        The BLE peer that sent this packet (optional).
+   * @returns The advertised NodeId if successful, null otherwise.
+   */
+  processDiscovery(discoveryPayload: Uint8Array, fromPeerId?: NodeId): NodeId | null {
+    const advertisedNodeId = safeDecodeDiscovery(discoveryPayload);
+    if (!advertisedNodeId) {
+      return null;
+    }
+
+    // Record in the mesh discovery registry.
+    // This does NOT create a direct BLE peer mapping.
+    // The hopCount is estimated from whether we have a direct peer mapping.
+    const hopCount = fromPeerId && this.reverseMappings.has(fromPeerId) ? 1 : 0;
+    this.discoveryRegistry.record(advertisedNodeId, hopCount, fromPeerId);
+
+    console.log(`[BitChatAdapter] Discovered node: ${advertisedNodeId} (hop ${hopCount})`);
+    return advertisedNodeId;
+  }
+
+  /**
+   * Get all recently discovered mesh nodes.
+   *
+   * @returns Array of DiscoveredNode records.
+   */
+  getDiscoveredNodes() {
+    return this.discoveryRegistry.getAll();
+  }
+
+  /**
+   * Check if a node ID is a directly connected BLE peer
+   * (as opposed to a mesh-discovered remote node).
+   *
+   * @returns true if the node has a direct BLE peer mapping.
+   */
+  isDirectPeer(nodeId: NodeId): boolean {
+    return this.reverseMappings.has(normalizeNodeId(nodeId));
+  }
+
   // ── Receive Path ─────────────────────────────────────────────
 
   /**
-   * Process incoming BLE data that has been identified as a BITCHAT envelope.
+   * Process incoming BITCHAT data.
    *
-   * Routes through RelayEngine for destination-aware delivery and forwarding.
+   * - ANNOUNCE: processed locally for direct peer identity (never relayed)
+   * - DISCOVERY: recorded in MeshDiscoveryRegistry, then forwarded via RelayEngine
+   * - DATA: delivered if addressed, forwarded via RelayEngine
    *
-   * @param rawData    The raw BITCHAT envelope bytes (after V6B unwrap if applicable).
+   * @param rawData    The raw BITCHAT envelope bytes.
    * @param blePeerId  The BLE peer identifier.
-   * @returns 'announce' | 'data' | null (null = not valid BITCHAT)
+   * @returns 'announce' | 'discovery' | 'data' | null
    */
-  async receive(rawData: Uint8Array, blePeerId: string): Promise<'announce' | 'data' | null> {
+  async receive(rawData: Uint8Array, blePeerId: string): Promise<'announce' | 'discovery' | 'data' | null> {
     if (rawData.length < BITCHAT_HEADER_SIZE || rawData[0] !== PROTOCOL_VERSION) {
       return null;
     }
@@ -241,24 +317,30 @@ export class BitChatBLEAdapter {
       return null;
     }
 
-    // V9C: ANNOUNCE is a direct-link-only control packet.
-    // It must NEVER be relayed through the mesh. Processing it here
-    // ensures the BLE peer ID ↔ node ID mapping uses the DIRECTLY
-    // connected peer, not an intermediate relay node.
+    // V9C: ANNOUNCE is direct-link-only. Process locally, never relay.
     if (packet.packetType === PACKET_TYPE_ANNOUNCE) {
       this.processAnnounce(packet.payload, blePeerId);
       return 'announce';
     }
 
-    // DATA packets: resolve BLE peer → BITCHAT NodeId
+    // V9D: DISCOVERY is mesh-flooded like DATA.
+    // Process locally (record in discovery registry), then forward via RelayEngine.
+    if (packet.packetType === PACKET_TYPE_DISCOVERY) {
+      const fromNodeId = this.getNodeIdForBlePeer(blePeerId);
+      this.processDiscovery(packet.payload, fromNodeId);
+
+      // Forward through RelayEngine (controlled flooding with TTL)
+      await this.relayEngine.receive(packet, fromNodeId);
+      return 'discovery';
+    }
+
+    // DATA: resolve BLE peer → BITCHAT NodeId, route through RelayEngine
     const fromNodeId = this.getNodeIdForBlePeer(blePeerId);
     if (fromNodeId) {
       this.peerRegistry.markSeen(fromNodeId);
     }
 
-    // Route DATA through RelayEngine (destination-aware delivery + forwarding)
     await this.relayEngine.receive(packet, fromNodeId);
-
     return 'data';
   }
 
@@ -266,11 +348,6 @@ export class BitChatBLEAdapter {
 
   /**
    * Originate a locally-produced payload as a BITCHAT DATA packet.
-   *
-   * @param payload          The V6B payload to send.
-   * @param packetId         Unique packet identifier.
-   * @param destinationNodeId  Target node (or NODE_ID_BROADCAST for broadcast).
-   * @param ttl              Optional TTL override (default: DEFAULT_TTL).
    */
   async originate(
     payload: Uint8Array,
@@ -278,7 +355,6 @@ export class BitChatBLEAdapter {
     destinationNodeId: NodeId = NODE_ID_BROADCAST,
     ttl: number = DEFAULT_TTL,
   ): Promise<void> {
-    // Track originated packet to suppress self-delivery
     this.originatedPacketId = packetId;
 
     const packet: BitChatPacket = {
@@ -287,6 +363,29 @@ export class BitChatBLEAdapter {
       ttl,
       sourceNodeId: this.localNodeId,
       destinationNodeId,
+      packetId,
+      flags: FLAGS_NONE,
+      payload,
+    };
+
+    await this.relayEngine.originate(packet);
+  }
+
+  /**
+   * Originate a DISCOVERY packet to advertise this node's identity across the mesh.
+   */
+  async originateDiscovery(ttl: number = DEFAULT_TTL): Promise<void> {
+    const payload = encodeDiscovery(this.localNodeId);
+    const packetId = normalizeNodeId(
+      BigInt(Date.now()) ^ BigInt('0x' + this.localNodeId.slice(2)) ^ BigInt(0xD),
+    );
+
+    const packet: BitChatPacket = {
+      version: PROTOCOL_VERSION,
+      packetType: PACKET_TYPE_DISCOVERY,
+      ttl,
+      sourceNodeId: this.localNodeId,
+      destinationNodeId: NODE_ID_BROADCAST,
       packetId,
       flags: FLAGS_NONE,
       payload,

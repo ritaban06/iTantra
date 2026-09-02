@@ -12,6 +12,7 @@ export {
   PROTOCOL_VERSION,
   PACKET_TYPE_DATA,
   PACKET_TYPE_ANNOUNCE,
+  PACKET_TYPE_DISCOVERY,
   VALID_PACKET_TYPES,
   FLAGS_NONE,
   NODE_ID_BROADCAST,
@@ -55,6 +56,14 @@ export {
   safeDecodeAnnounce,
 } from './AnnounceCodec';
 
+// ── DISCOVERY Payload Codec ────────────────────────────────────
+
+export {
+  encodeDiscovery,
+  decodeDiscovery,
+  safeDecodeDiscovery,
+} from './DiscoveryPacketCodec';
+
 // ── Peer ─────────────────────────────────────────────────────────
 
 export type { PeerState, PeerInfo } from './peer';
@@ -68,6 +77,8 @@ export { MeshRouter } from './mesh';
 export type { PeerQuery } from './mesh';
 export { RelayEngine } from './mesh';
 export type { SendToPeerFn, DeliverFn, RelayEngineParams } from './mesh';
+export { MeshDiscoveryRegistry } from './mesh';
+export type { DiscoveredNode } from './mesh';
 
 // ── Identity ──────────────────────────────────────────────────
 

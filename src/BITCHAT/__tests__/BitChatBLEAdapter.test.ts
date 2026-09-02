@@ -710,4 +710,232 @@ describe('BitChatBLEAdapter Integration', () => {
     await nodeA.adapter.receive(announce2, 'ble_B_second');
     expect(nodeA.adapter.getNodeIdForBlePeer('ble_B_second')).toBe(nodeB.localNodeId);
   });
+
+  // ── V9D Mesh Discovery Tests ──────────────────────────────────
+
+  // Test 27: local discovery packet creation
+  it('creates a valid DISCOVERY packet', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const announceBytes = nodeA.adapter.createDiscoveryPacket();
+
+    const { safeDecode } = require('../core/BitChatPacketCodec');
+    const decoded = safeDecode(announceBytes);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.packetType).toBe(0x03); // PACKET_TYPE_DISCOVERY
+    expect(decoded!.sourceNodeId).toBe(nodeA.localNodeId);
+    expect(decoded!.destinationNodeId).toBe(NODE_ID_BROADCAST);
+  });
+
+  // Test 28: discovery flooding A→B→C
+  it('DISCOVERY floods from A through B to C', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeC = createSimNode('0x0000000000000003');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeC, 'ble_BC', 'ble_CB');
+
+    // A originates discovery
+    await nodeA.adapter.originateDiscovery();
+
+    // B receives from A
+    const bReceives = nodeA.bleSends.get('ble_AB')![0];
+    expect(bReceives).toBeDefined();
+    await nodeB.adapter.receive(bReceives, 'ble_BA');
+
+    // B should have discovered A
+    expect(nodeB.adapter.discoveryRegistry.has(nodeA.localNodeId)).toBe(true);
+
+    // B forwards to C
+    const cReceives = nodeB.bleSends.get('ble_BC')![0];
+    expect(cReceives).toBeDefined();
+
+    // C receives from B
+    await nodeC.adapter.receive(cReceives, 'ble_CB');
+
+    // C should have discovered A (2 hops away)
+    expect(nodeC.adapter.discoveryRegistry.has(nodeA.localNodeId)).toBe(true);
+    const discovered = nodeC.adapter.discoveryRegistry.get(nodeA.localNodeId)!;
+    expect(discovered.hopCount).toBe(1); // 1 hop from C's perspective (B relayed it)
+  });
+
+  // Test 29: discovery deduplication
+  it('duplicate DISCOVERY packets are deduplicated', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeC = createSimNode('0x0000000000000003');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeC, 'ble_BC', 'ble_CB');
+    connectNodes(nodeA, nodeC, 'ble_AC', 'ble_CA');
+
+    // A originates discovery
+    await nodeA.adapter.originateDiscovery();
+
+    // B receives from A, forwards to C
+    const bReceives = nodeA.bleSends.get('ble_AB')![0];
+    await nodeB.adapter.receive(bReceives, 'ble_BA');
+
+    // A also sends directly to C
+    const aToC = nodeA.bleSends.get('ble_AC')![0];
+    // C receives from A (via direct link) first
+    await nodeC.adapter.receive(aToC, 'ble_CA');
+
+    // C should have discovered A
+    expect(nodeC.adapter.discoveryRegistry.has(nodeA.localNodeId)).toBe(true);
+
+    // Now C receives the same discovery from B (duplicate)
+    const cReceivesFromB = nodeB.bleSends.get('ble_BC')![0];
+    await nodeC.adapter.receive(cReceivesFromB, 'ble_CB');
+
+    // Count should still be 1 (dedup)
+    expect(nodeC.adapter.discoveryRegistry.getCount()).toBe(1);
+  });
+
+  // Test 30: remote discovered Node ID is NOT treated as direct BLE peer
+  it('discovered node is NOT a direct BLE peer', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeC = createSimNode('0x0000000000000003');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeC, 'ble_BC', 'ble_CB');
+
+    // A originates discovery
+    await nodeA.adapter.originateDiscovery();
+
+    // C receives from B
+    const bReceives = nodeA.bleSends.get('ble_AB')![0];
+    await nodeB.adapter.receive(bReceives, 'ble_BA');
+    const cReceives = nodeB.bleSends.get('ble_BC')![0];
+    await nodeC.adapter.receive(cReceives, 'ble_CB');
+
+    // C discovered A in the registry
+    expect(nodeC.adapter.discoveryRegistry.has(nodeA.localNodeId)).toBe(true);
+
+    // But C does NOT have A as a direct BLE peer
+    expect(nodeC.adapter.isDirectPeer(nodeA.localNodeId)).toBe(false);
+    // C's only direct peer is B
+    expect(nodeC.adapter.isDirectPeer(nodeB.localNodeId)).toBe(true);
+  });
+
+  // Test 31: discovered F can be used as destinationNodeId
+  it('discovered node can be used as destinationNodeId', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeF = createSimNode('0x000000000000000F');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeF, 'ble_BF', 'ble_FB');
+
+    // F originates discovery so A can learn F's Node ID
+    await nodeF.adapter.originateDiscovery();
+    const bReceivesFromF = nodeF.bleSends.get('ble_FB')![0];
+    await nodeB.adapter.receive(bReceivesFromF, 'ble_BF');
+    const aReceivesFromB = nodeB.bleSends.get('ble_BA')![0];
+    await nodeA.adapter.receive(aReceivesFromB, 'ble_AB');
+
+    // A now knows F's Node ID
+    expect(nodeA.adapter.discoveryRegistry.has(nodeF.localNodeId)).toBe(true);
+
+    // A sends unicast DATA to F
+    const payload = new Uint8Array([0xDE, 0xAD]);
+    const packetId = normalizeNodeId(BigInt(3100));
+    await nodeA.adapter.originate(payload, packetId, nodeF.localNodeId);
+
+    // B receives from A, should forward to F
+    const bReceivesFromA = nodeA.bleSends.get('ble_AB')![0];
+    await nodeB.adapter.receive(bReceivesFromA, 'ble_BA');
+
+    // F receives from B
+    const fReceives = nodeB.bleSends.get('ble_BF')![0];
+    await nodeF.adapter.receive(fReceives, 'ble_FB');
+
+    // F should have delivered locally (addressed to F)
+    expect(nodeF.localDelivers.length).toBe(1);
+    expect(nodeF.localDelivers[0]).toEqual(payload);
+  });
+
+  // Test 32: unicast A→B→C→F delivers only at F
+  it('unicast delivers only at destination, not at relay nodes', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeF = createSimNode('0x000000000000000F');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeF, 'ble_BF', 'ble_FB');
+
+    const payload = new Uint8Array([0xCA, 0xFE]);
+    const packetId = normalizeNodeId(BigInt(3200));
+    await nodeA.adapter.originate(payload, packetId, nodeF.localNodeId);
+
+    // B receives from A
+    const bReceives = nodeA.bleSends.get('ble_AB')![0];
+    await nodeB.adapter.receive(bReceives, 'ble_BA');
+
+    // B should NOT deliver locally (addressed to F)
+    expect(nodeB.localDelivers.length).toBe(0);
+
+    // F receives from B
+    const fReceives = nodeB.bleSends.get('ble_BF')![0];
+    await nodeF.adapter.receive(fReceives, 'ble_FB');
+
+    // F should deliver locally
+    expect(nodeF.localDelivers.length).toBe(1);
+  });
+
+  // Test 33: existing DATA forwarding still works
+  it('existing DATA broadcast forwarding still works', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeC = createSimNode('0x0000000000000003');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeC, 'ble_BC', 'ble_CB');
+
+    const payload = new Uint8Array([0xDE, 0xAD]);
+    const packetId = normalizeNodeId(BigInt(3300));
+    await nodeA.adapter.originate(payload, packetId, NODE_ID_BROADCAST);
+
+    // B receives from A
+    const bReceives = nodeA.bleSends.get('ble_AB')![0];
+    await nodeB.adapter.receive(bReceives, 'ble_BA');
+
+    // B should deliver locally (broadcast)
+    expect(nodeB.localDelivers.length).toBe(1);
+
+    // B forwards to C
+    const cReceives = nodeB.bleSends.get('ble_BC')![0];
+    await nodeC.adapter.receive(cReceives, 'ble_CB');
+
+    // C should deliver locally (broadcast)
+    expect(nodeC.localDelivers.length).toBe(1);
+  });
+
+  // Test 34: DISCOVERY does not modify BLE peer mapping
+  it('DISCOVERY does not create direct BLE peer mapping', async () => {
+    const nodeA = createSimNode('0x0000000000000001');
+    const nodeB = createSimNode('0x0000000000000002');
+    const nodeC = createSimNode('0x0000000000000003');
+
+    connectNodes(nodeA, nodeB, 'ble_AB', 'ble_BA');
+    connectNodes(nodeB, nodeC, 'ble_BC', 'ble_CB');
+
+    // A originates discovery
+    await nodeA.adapter.originateDiscovery();
+
+    // C receives A's discovery via B
+    const bReceives = nodeA.bleSends.get('ble_AB')![0];
+    await nodeB.adapter.receive(bReceives, 'ble_BA');
+    const cReceives = nodeB.bleSends.get('ble_BC')![0];
+    await nodeC.adapter.receive(cReceives, 'ble_CB');
+
+    // C discovered A in the registry
+    expect(nodeC.adapter.discoveryRegistry.has(nodeA.localNodeId)).toBe(true);
+
+    // But C's BLE peer mapping is unaffected — only B is a direct peer
+    expect(nodeC.adapter.isDirectPeer(nodeA.localNodeId)).toBe(false);
+    expect(nodeC.adapter.isDirectPeer(nodeB.localNodeId)).toBe(true);
+    expect(nodeC.adapter.getConnectedPeers()).toEqual([nodeB.localNodeId]);
+  });
 });

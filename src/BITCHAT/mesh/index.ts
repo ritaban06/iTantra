@@ -8,3 +8,5 @@ export { MeshRouter } from './MeshRouter';
 export type { PeerQuery } from './MeshRouter';
 export { RelayEngine } from './RelayEngine';
 export type { SendToPeerFn, DeliverFn, RelayEngineParams } from './RelayEngine';
+export { MeshDiscoveryRegistry } from './MeshDiscoveryRegistry';
+export type { DiscoveredNode } from './MeshDiscoveryRegistry';
