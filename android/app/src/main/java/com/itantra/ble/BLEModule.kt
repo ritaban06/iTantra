@@ -11,6 +11,7 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule
 
@@ -271,16 +272,21 @@ class BLEModule(reactContext: ReactApplicationContext) :
 
     @SuppressLint("MissingPermission")
     @ReactMethod
-    fun connect(deviceId: String, promise: Promise) {
+    fun connect(deviceId: String, options: ReadableMap?, promise: Promise) {
         val missing = missingBlePermissions()
         if (missing.isNotEmpty()) {
             promise.reject("BLE_PERMISSION_DENIED", "Missing permissions: ${missing.joinToString()}")
             return
         }
 
-        if (connManager.connectionState == BLEConnectionManager.ConnectionState.CONNECTED ||
-            connManager.connectionState == BLEConnectionManager.ConnectionState.CONNECTING) {
-            promise.reject("ALREADY_CONNECTED", "Already connected or connecting")
+        // Multi-peer: only reject if THIS specific device is already connecting/connected.
+        if (connManager.isConnectedTo(deviceId)) {
+            promise.reject("ALREADY_CONNECTED", "Already connected to $deviceId")
+            return
+        }
+        val existingState = connManager.peerStates[deviceId]
+        if (existingState?.state == BLEConnectionManager.ConnectionState.CONNECTING) {
+            promise.reject("ALREADY_CONNECTING", "Already connecting to $deviceId")
             return
         }
 
@@ -289,17 +295,21 @@ class BLEModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
-    fun disconnect(promise: Promise) {
-        connManager.disconnect()
+    fun disconnect(options: ReadableMap?, promise: Promise) {
+        val targetDeviceId = options?.getString("deviceId")
+        if (targetDeviceId != null) {
+            // Peer-targeted disconnect
+            connManager.disconnect(targetDeviceId)
+        } else {
+            // Legacy disconnect-all behavior
+            connManager.disconnect()
+        }
         promise.resolve(true)
     }
 
     @ReactMethod
-    fun send(base64Data: String, promise: Promise) {
-        if (connManager.connectionState != BLEConnectionManager.ConnectionState.CONNECTED) {
-            promise.reject("NOT_CONNECTED", "Not connected to any device")
-            return
-        }
+    fun send(base64Data: String, options: ReadableMap?, promise: Promise) {
+        val targetDeviceId = options?.getString("deviceId")
 
         val data = try {
             Base64.decode(base64Data, Base64.NO_WRAP)
@@ -308,31 +318,80 @@ class BLEModule(reactContext: ReactApplicationContext) :
             return
         }
 
-        val error = connManager.send(data)
-        if (error != null) {
-            val map = Arguments.createMap().apply {
-                putString("error", error)
+        if (targetDeviceId != null) {
+            // Peer-targeted send: route to specific peer.
+            // Do NOT fall back to another peer if this one is unavailable.
+            if (!connManager.isConnectedTo(targetDeviceId)) {
+                promise.reject("NOT_CONNECTED", "Peer $targetDeviceId is not connected")
+                return
             }
-            emitEvent(BLEConstants.EVENT_SEND_FAILED, map)
-            promise.reject("SEND_FAILED", error)
-            return
+            val error = connManager.send(data, targetDeviceId)
+            if (error != null) {
+                val map = Arguments.createMap().apply {
+                    putString("error", error)
+                }
+                emitEvent(BLEConstants.EVENT_SEND_FAILED, map)
+                promise.reject("SEND_FAILED", error)
+                return
+            }
+            val map = Arguments.createMap().apply {
+                putInt("bytesWritten", data.size)
+            }
+            emitEvent(BLEConstants.EVENT_SEND_SUCCESS, map)
+            promise.resolve(true)
+        } else {
+            // Legacy single-peer send: use legacy connectedDeviceId.
+            if (connManager.connectionState != BLEConnectionManager.ConnectionState.CONNECTED) {
+                promise.reject("NOT_CONNECTED", "Not connected to any device")
+                return
+            }
+            val error = connManager.send(data)
+            if (error != null) {
+                val map = Arguments.createMap().apply {
+                    putString("error", error)
+                }
+                emitEvent(BLEConstants.EVENT_SEND_FAILED, map)
+                promise.reject("SEND_FAILED", error)
+                return
+            }
+            val map = Arguments.createMap().apply {
+                putInt("bytesWritten", data.size)
+            }
+            emitEvent(BLEConstants.EVENT_SEND_SUCCESS, map)
+            promise.resolve(true)
         }
-
-        val map = Arguments.createMap().apply {
-            putInt("bytesWritten", data.size)
-        }
-        emitEvent(BLEConstants.EVENT_SEND_SUCCESS, map)
-        promise.resolve(true)
     }
 
     @ReactMethod
-    fun getConnectionState(promise: Promise) {
-        val map = Arguments.createMap().apply {
-            putString("state", connManager.connectionState.name)
-            putString("deviceId", connManager.connectedDeviceId ?: "")
-            putInt("mtu", connManager.mtu)
+    fun getConnectionState(options: ReadableMap?, promise: Promise) {
+        val targetDeviceId = options?.getString("deviceId")
+
+        if (targetDeviceId != null) {
+            // Per-peer state query
+            val peerState = connManager.peerStates[targetDeviceId]
+            val map = Arguments.createMap().apply {
+                if (peerState != null) {
+                    putString("state", peerState.state.name)
+                    putString("deviceId", peerState.deviceId)
+                    putInt("mtu", peerState.mtu)
+                    putString("role", peerState.role.name)
+                } else {
+                    putString("state", "IDLE")
+                    putString("deviceId", targetDeviceId)
+                    putInt("mtu", 23)
+                    putString("role", "UNKNOWN")
+                }
+            }
+            promise.resolve(map)
+        } else {
+            // Legacy single-peer state query
+            val map = Arguments.createMap().apply {
+                putString("state", connManager.connectionState.name)
+                putString("deviceId", connManager.connectedDeviceId ?: "")
+                putInt("mtu", connManager.mtu)
+            }
+            promise.resolve(map)
         }
-        promise.resolve(map)
     }
 
     // ── Required by RN event emitter ──────────────────────────────────

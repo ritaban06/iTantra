@@ -11,6 +11,12 @@ import android.util.Log
  *
  * The phone can advertise + run GATT server simultaneously while also scanning
  * and acting as a GATT client — enabling symmetric peer-to-peer discovery and connection.
+ *
+ * V9E Step 1: Per-peer connection state model.
+ *
+ * The source of truth for connection state is [peerStates], a map keyed by iTantra device ID.
+ * Legacy properties ([connectedDeviceId], [connectionState], [mtu]) are retained for backward
+ * compatibility and reflect the first/primary connected peer.
  */
 class BLEConnectionManager(private val context: Context) {
 
@@ -22,12 +28,130 @@ class BLEConnectionManager(private val context: Context) {
         IDLE, SCANNING, CONNECTING, CONNECTED, DISCONNECTING
     }
 
+    /**
+     * Whether this peer connection was initiated locally (CLIENT)
+     * or accepted from a remote device (SERVER).
+     */
+    enum class ConnectionRole {
+        CLIENT, SERVER
+    }
+
+    /**
+     * Per-peer connection state.
+     *
+     * Each BLE peer (identified by iTantra device ID) has its own independent
+     * connection state, MTU, and role. Updating one peer's state must never
+     * affect another peer's state.
+     */
+    data class PeerConnectionState(
+        val deviceId: String,
+        var state: ConnectionState,
+        var mtu: Int,
+        val role: ConnectionRole
+    )
+
     interface Listener {
         fun onConnectionStateChange(state: ConnectionState, deviceId: String?, mtu: Int?)
         fun onDataReceived(data: ByteArray, fromDevice: String)
         fun onDeviceFound(deviceId: String, name: String?, rssi: Int)
         fun onScanError(code: String, message: String)
         fun onConnectionError(code: String, message: String)
+    }
+
+    // ── Multi-peer send/disconnect API ────────────────────────────────
+
+    /**
+     * Send data to a specific peer, routing based on connection role.
+     *
+     * For CLIENT peers: routes through BLEGattClient.send(data, deviceId).
+     * For SERVER peers: routes through BLEGattServer.sendNotification(data, device).
+     *
+     * @return null on success, or an error string.
+     */
+    fun send(data: ByteArray, deviceId: String): String? {
+        val peerState = peerStates[deviceId]
+            ?: return "NOT_CONNECTED"
+
+        return when (peerState.role) {
+            ConnectionRole.CLIENT -> {
+                gattClient.send(data, deviceId)
+            }
+            ConnectionRole.SERVER -> {
+                val btDevice = deviceMap[deviceId]
+                    ?: bluetoothManager?.adapter?.getRemoteDevice(
+                        peerState.deviceId
+                    )
+                if (btDevice != null && gattServer.isRunning) {
+                    gattServer.sendNotification(data, btDevice)
+                } else {
+                    "NOT_CONNECTED"
+                }
+            }
+        }
+    }
+
+    /**
+     * Disconnect a specific peer.
+     *
+     * For CLIENT peers: disconnects via BLEGattClient.
+     * For SERVER peers: cancels the connection via GATT server.
+     */
+    fun disconnect(deviceId: String) {
+        val peerState = peerStates[deviceId] ?: return
+
+        when (peerState.role) {
+            ConnectionRole.CLIENT -> {
+                gattClient.disconnect(deviceId)
+            }
+            ConnectionRole.SERVER -> {
+                val btDevice = deviceMap[deviceId]
+                if (btDevice != null) {
+                    gattServer.cancelConnection(btDevice)
+                }
+            }
+        }
+        removePeerState(deviceId)
+        syncLegacyState()
+    }
+
+    /**
+     * Disconnect all peers.
+     */
+    fun disconnectAll() {
+        // Disconnect all GATT client peers
+        gattClient.disconnect()
+        // Disconnect all GATT server peers
+        val serverPeers = peerStates.values.filter { it.role == ConnectionRole.SERVER }
+        for (peer in serverPeers) {
+            val btDevice = deviceMap[peer.deviceId]
+            if (btDevice != null) {
+                gattServer.cancelConnection(btDevice)
+            }
+        }
+        peerStates.clear()
+        syncLegacyState()
+    }
+
+    /**
+     * Check if a specific peer is connected.
+     */
+    fun isConnectedTo(deviceId: String): Boolean {
+        return peerStates[deviceId]?.state == ConnectionState.CONNECTED
+    }
+
+    /**
+     * Get the number of connected peers.
+     */
+    val connectedPeerCount: Int
+        get() = peerStates.values.count { it.state == ConnectionState.CONNECTED }
+
+    /**
+     * Get all connected peer device IDs.
+     */
+    fun getConnectedDeviceIds(): List<String> {
+        return peerStates.values
+            .filter { it.state == ConnectionState.CONNECTED }
+            .map { it.deviceId }
     }
 
     private val bluetoothManager: BluetoothManager? =
@@ -42,6 +166,22 @@ class BLEConnectionManager(private val context: Context) {
 
     /** Map from iTantra device ID → Android BluetoothDevice (populated during scanning). */
     private val deviceMap = mutableMapOf<String, BluetoothDevice>()
+
+    // ── Per-peer state (source of truth) ─────────────────────────────
+
+    /**
+     * Per-peer connection state map, keyed by iTantra device ID.
+     *
+     * This is the authoritative source of truth for connection state.
+     * Each entry is independent — updating one peer never affects another.
+     */
+    val peerStates = mutableMapOf<String, PeerConnectionState>()
+
+    // ── Legacy single-peer properties (backward compatibility) ───────
+    //
+    // These are retained so existing code that reads them continues to work.
+    // They reflect the first/primary connected peer. They are NOT the source
+    // of truth — [peerStates] is.
 
     @Volatile
     var connectionState: ConnectionState = ConnectionState.IDLE
@@ -78,16 +218,17 @@ class BLEConnectionManager(private val context: Context) {
             override fun onClientConnected(device: BluetoothDevice) {
                 Log.d(TAG, "GATT server: client connected ${device.address}")
                 val fromDeviceId = findDeviceIdByAddress(device.address) ?: device.address
-                connectedDeviceId = fromDeviceId
-                connectionState = ConnectionState.CONNECTED
+                updatePeerState(fromDeviceId, ConnectionState.CONNECTED, mtu, ConnectionRole.SERVER)
                 listener?.onConnectionStateChange(ConnectionState.CONNECTED, fromDeviceId, mtu)
             }
 
             override fun onClientDisconnected(device: BluetoothDevice) {
                 Log.d(TAG, "GATT server: client disconnected ${device.address}")
-                connectedDeviceId = null
-                connectionState = ConnectionState.IDLE
-                listener?.onConnectionStateChange(ConnectionState.IDLE, null, mtu)
+                val fromDeviceId = findDeviceIdByAddress(device.address) ?: device.address
+                removePeerState(fromDeviceId)
+                // Legacy: only clear global state if no other peers remain connected
+                syncLegacyState()
+                listener?.onConnectionStateChange(ConnectionState.IDLE, fromDeviceId, mtu)
             }
 
             override fun onDataReceived(data: ByteArray, device: BluetoothDevice) {
@@ -100,30 +241,107 @@ class BLEConnectionManager(private val context: Context) {
         // GATT client events.
         gattClient.listener = object : BLEGattClient.Listener {
             override fun onConnected(deviceId: String, mtuValue: Int) {
-                mtu = mtuValue
-                connectedDeviceId = deviceId
-                connectionState = ConnectionState.CONNECTED
+                updatePeerState(deviceId, ConnectionState.CONNECTED, mtuValue, ConnectionRole.CLIENT)
                 listener?.onConnectionStateChange(ConnectionState.CONNECTED, deviceId, mtuValue)
             }
 
             override fun onDisconnected(deviceId: String, reason: String) {
-                connectionState = ConnectionState.IDLE
-                connectedDeviceId = null
+                removePeerState(deviceId)
+                syncLegacyState()
                 listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
             }
 
-            override fun onDataReceived(data: ByteArray) {
+            override fun onDataReceived(deviceId: String, data: ByteArray) {
                 // Data received from remote device (this phone is client role).
-                val fromDeviceId = connectedDeviceId ?: "unknown"
-                listener?.onDataReceived(data, fromDeviceId)
+                // Use the deviceId provided by the per-peer callback.
+                listener?.onDataReceived(data, deviceId)
             }
 
-            override fun onError(code: String, message: String) {
-                connectionState = ConnectionState.IDLE
-                connectedDeviceId = null
+            override fun onError(deviceId: String?, code: String, message: String) {
+                // Remove failed peer from peerStates if applicable
+                if (deviceId != null) {
+                    removePeerState(deviceId)
+                }
+                syncLegacyState()
                 listener?.onConnectionError(code, message)
             }
         }
+    }
+
+    // ── Per-peer state management ────────────────────────────────────
+
+    /**
+     * Create or update the per-peer connection state for a given device.
+     *
+     * This is the single point of truth for connection state changes.
+     * It updates [peerStates] and synchronizes the legacy properties.
+     */
+    private fun updatePeerState(
+        deviceId: String,
+        state: ConnectionState,
+        mtuValue: Int,
+        role: ConnectionRole
+    ) {
+        val existing = peerStates[deviceId]
+        if (existing != null) {
+            existing.state = state
+            existing.mtu = mtuValue
+        } else {
+            peerStates[deviceId] = PeerConnectionState(
+                deviceId = deviceId,
+                state = state,
+                mtu = mtuValue,
+                role = role
+            )
+        }
+        // Synchronize legacy properties
+        syncLegacyState()
+    }
+
+    /**
+     * Remove a peer from [peerStates] (on disconnect).
+     *
+     * Only removes the specific peer — other peers are unaffected.
+     */
+    private fun removePeerState(deviceId: String) {
+        peerStates.remove(deviceId)
+    }
+
+    /**
+     * Synchronize legacy single-peer properties from [peerStates].
+     *
+     * Finds the first CONNECTED peer and reflects its state in the legacy
+     * properties. If no peers are connected, legacy state is set to IDLE.
+     *
+     * This ensures backward compatibility while [peerStates] remains
+     * the source of truth.
+     */
+    private fun syncLegacyState() {
+        val connected = peerStates.values.find { it.state == ConnectionState.CONNECTED }
+        if (connected != null) {
+            connectedDeviceId = connected.deviceId
+            connectionState = connected.state
+            mtu = connected.mtu
+        } else {
+            // No connected peers — check for connecting/disconnecting
+            val active = peerStates.values.find {
+                it.state == ConnectionState.CONNECTING || it.state == ConnectionState.DISCONNECTING
+            }
+            if (active != null) {
+                connectedDeviceId = active.deviceId
+                connectionState = active.state
+            } else {
+                connectedDeviceId = null
+                connectionState = ConnectionState.IDLE
+            }
+        }
+    }
+
+    /**
+     * Cancel a GATT server connection.
+     */
+    fun cancelConnection(device: BluetoothDevice) {
+        gattServer.cancelConnection(device)
     }
 
     // ── Public API ────────────────────────────────────────────────────
@@ -149,53 +367,61 @@ class BLEConnectionManager(private val context: Context) {
      *
      * The BluetoothDevice must have been obtained from a scan result and registered
      * via registerDevice() before calling this.
+     *
+     * Multiple simultaneous connections are supported. Connecting to a new peer
+     * does not block because another peer is already connected.
      */
     @SuppressLint("MissingPermission")
     fun connect(deviceId: String) {
+        // Check if this deviceId is already connected/connecting
+        val existingState = peerStates[deviceId]
+        if (existingState != null && (
+                existingState.state == ConnectionState.CONNECTED ||
+                existingState.state == ConnectionState.CONNECTING
+            )) {
+            Log.w(TAG, "Already connected or connecting to $deviceId, ignoring")
+            return
+        }
+
         val btDevice = deviceMap[deviceId]
         if (btDevice == null) {
             listener?.onConnectionError("UNKNOWN_DEVICE", "No BluetoothDevice for $deviceId")
             return
         }
 
-        connectionState = ConnectionState.CONNECTING
+        // Create per-peer state in CONNECTING state
+        updatePeerState(deviceId, ConnectionState.CONNECTING, 23, ConnectionRole.CLIENT)
         listener?.onConnectionStateChange(ConnectionState.CONNECTING, deviceId, null)
 
         gattClient.connect(btDevice, deviceId)
     }
 
-    /** Disconnect the active GATT client connection. */
+    /**
+     * Disconnect the active GATT client connection (legacy single-peer API).
+     */
     fun disconnect() {
-        connectionState = ConnectionState.DISCONNECTING
         gattClient.disconnect()
-        connectionState = ConnectionState.IDLE
-        connectedDeviceId = null
+        peerStates.clear()
+        syncLegacyState()
     }
 
-    /** Send data to the connected peer. */
+    /**
+     * Send data to the connected peer (legacy single-peer API).
+     */
     fun send(data: ByteArray): String? {
-        if (gattClient.isConnected) {
-            return gattClient.send(data)
-        }
-        
-        // If not connected as client, try as server.
-        val deviceAddress = connectedDeviceId?.let { deviceMap[it]?.address }
-        if (deviceAddress != null) {
-            val device = bluetoothManager?.adapter?.getRemoteDevice(deviceAddress)
-            if (device != null && gattServer.isRunning) {
-                return gattServer.sendNotification(data, device)
-            }
-        }
-        return "NOT_CONNECTED"
+        // Use legacy connectedDeviceId to find the target peer
+        val targetId = connectedDeviceId ?: return "NOT_CONNECTED"
+        return send(data, targetId)
     }
 
     /** Stop everything. */
     fun stop() {
-        disconnect()
+        disconnectAll()
         scanner.stopScanning()
         advertiser.stopAdvertising()
         gattServer.stop()
-        connectionState = ConnectionState.IDLE
+        peerStates.clear()
+        syncLegacyState()
     }
 
     /**

@@ -90,15 +90,19 @@ export default {
 
   connect: (deviceId: string): Promise<boolean> => NativeBLE.connect(deviceId),
 
-  disconnect: (): Promise<boolean> => NativeBLE.disconnect(),
+  disconnect: (deviceId?: string): Promise<boolean> =>
+    deviceId ? NativeBLE.disconnect({ deviceId }) : NativeBLE.disconnect(),
 
   /**
-   * Send data to the connected peer.
+   * Send data to a connected peer.
    * @param base64Data Base64-encoded bytes to send.
+   * @param deviceId Optional target peer ID. If omitted, sends to legacy connected peer.
    */
-  send: (base64Data: string): Promise<boolean> => NativeBLE.send(base64Data),
+  send: (base64Data: string, deviceId?: string): Promise<boolean> =>
+    deviceId ? NativeBLE.send(base64Data, { deviceId }) : NativeBLE.send(base64Data),
 
-  getConnectionState: (): Promise<ConnectionStateInfo> => NativeBLE.getConnectionState(),
+  getConnectionState: (deviceId?: string): Promise<ConnectionStateInfo> =>
+    deviceId ? NativeBLE.getConnectionState({ deviceId }) : NativeBLE.getConnectionState(),
 
   // ── V1 Event listeners ─────────────────────────────────────────────
 

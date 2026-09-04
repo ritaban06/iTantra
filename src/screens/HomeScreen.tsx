@@ -153,7 +153,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
 
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('Connect')}>
           <Text style={styles.cardTitle}>Discover</Text>
-          <Text style={styles.cardDesc}>Pair via BLE / Wi-Fi</Text>
+          <Text style={styles.cardDesc}>Pair via BLE</Text>
         </TouchableOpacity>
 
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('Language')}>
@@ -179,6 +179,11 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
         <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('LoopTest')}>
           <Text style={styles.cardTitle}>Local Loop</Text>
           <Text style={styles.cardDesc}>Test Speech Loop</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.card} onPress={() => navigation.navigate('SherpaDiag')}>
+          <Text style={styles.cardTitle}>Speech Diag</Text>
+          <Text style={styles.cardDesc}>Experimental sherpa-onnx</Text>
         </TouchableOpacity>
       </View>
 

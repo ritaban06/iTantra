@@ -8,30 +8,30 @@ export default function BenchmarkScreen() {
       <Text style={styles.headerTitle}>iTantra Performance</Text>
       
       <View style={styles.metricCard}>
-        <Text style={styles.label}>STT Engine (Vosk)</Text>
-        <Text style={styles.value}>Latency: 420 ms</Text>
+        <Text style={styles.label}>STT Engine</Text>
+        <Text style={styles.value}>Speech → STT final: not yet measured on device</Text>
       </View>
-      
+
       <View style={styles.metricCard}>
-        <Text style={styles.label}>TTS Engine (Piper)</Text>
-        <Text style={styles.value}>RTF: 0.31</Text>
+        <Text style={styles.label}>TTS Engine (device TTS)</Text>
+        <Text style={styles.value}>RTF: not yet measured on device</Text>
       </View>
-      
+
       <View style={styles.metricCard}>
         <Text style={styles.label}>Network (BLE)</Text>
-        <Text style={styles.value}>Payload: 84 bytes</Text>
-        <Text style={styles.value}>E2E Latency: 1.12 sec</Text>
+        <Text style={styles.value}>Bytes per message: derived from protocol (V6A 18B + V6B 10B + BITCHAT 28B + text)</Text>
+        <Text style={styles.value}>E2E Latency: not yet measured on device</Text>
       </View>
 
       <View style={styles.metricCard}>
         <Text style={styles.label}>System</Text>
-        <Text style={styles.value}>RAM: 410 MB</Text>
-        <Text style={styles.value}>CPU: 32%</Text>
+        <Text style={styles.value}>RAM / CPU / footprint: not yet measured on device</Text>
       </View>
-      
-      <TouchableOpacity style={styles.refreshBtn}>
-        <Text style={styles.refreshText}>REFRESH METRICS</Text>
-      </TouchableOpacity>
+
+      <Text style={styles.note}>
+        These metrics require physical-device measurement (see the physical validation matrix).
+        No numbers are shown until they are actually measured.
+      </Text>
     </SafeAreaView>
   );
 }
@@ -42,6 +42,5 @@ const styles = StyleSheet.create({
   metricCard: { backgroundColor: '#1c1c1e', padding: 20, borderRadius: 12, marginBottom: 15, borderWidth: 1, borderColor: '#2c2c2e' },
   label: { color: '#8e8e93', fontSize: 14, marginBottom: 10, textTransform: 'uppercase', fontWeight: 'bold' },
   value: { color: '#fff', fontSize: 18, marginBottom: 5 },
-  refreshBtn: { marginTop: 20, backgroundColor: '#00e676', padding: 15, borderRadius: 8, alignItems: 'center' },
-  refreshText: { color: '#000', fontWeight: 'bold' }
+  note: { color: '#8e8e93', fontSize: 13, marginTop: 10, lineHeight: 18 }
 });
