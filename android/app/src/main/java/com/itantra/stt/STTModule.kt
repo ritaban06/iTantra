@@ -63,7 +63,9 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
                 VoskSTTEngine(voskPath)
             }
             EngineType.INDIC_CONFORMER -> {
-                IndicConformerSTTEngine(reactApplicationContext, language)
+                // Obsolete: IndicConformerSTTEngine removed. Sherpa-ONNX replaces it.
+                promise.reject("ENGINE_DEPRECATED", "IndicConformer engine removed. Use Sherpa-ONNX.")
+                return
             }
         }
 
@@ -96,12 +98,8 @@ class STTModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         val loaded = when (config.engine) {
             EngineType.VOSK -> sttEngine?.loadModel(config.modelPath)
             EngineType.INDIC_CONFORMER -> {
-                val (absModel, absVocab) = ModelManager.getIndicConformerAbsolutePaths(reactApplicationContext, language)
-                if (absModel != null) {
-                    sttEngine?.loadModel(absModel, absVocab)
-                } else {
-                    sttEngine?.loadModel(config.modelPath, config.vocabPath)
-                }
+                // Obsolete path — should never reach here after guard above.
+                false
             }
         }
 
