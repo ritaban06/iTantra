@@ -88,10 +88,10 @@ export default {
 
   // ── V2 GATT methods ───────────────────────────────────────────────
 
-  connect: (deviceId: string): Promise<boolean> => NativeBLE.connect(deviceId),
+  connect: (deviceId: string): Promise<boolean> => NativeBLE.connect(deviceId, null),
 
   disconnect: (deviceId?: string): Promise<boolean> =>
-    deviceId ? NativeBLE.disconnect({ deviceId }) : NativeBLE.disconnect(),
+    deviceId ? NativeBLE.disconnect({ deviceId }) : NativeBLE.disconnect(null),
 
   /**
    * Send data to a connected peer.
@@ -99,10 +99,10 @@ export default {
    * @param deviceId Optional target peer ID. If omitted, sends to legacy connected peer.
    */
   send: (base64Data: string, deviceId?: string): Promise<boolean> =>
-    deviceId ? NativeBLE.send(base64Data, { deviceId }) : NativeBLE.send(base64Data),
+    deviceId ? NativeBLE.send(base64Data, { deviceId }) : NativeBLE.send(base64Data, null),
 
   getConnectionState: (deviceId?: string): Promise<ConnectionStateInfo> =>
-    deviceId ? NativeBLE.getConnectionState({ deviceId }) : NativeBLE.getConnectionState(),
+    deviceId ? NativeBLE.getConnectionState({ deviceId }) : NativeBLE.getConnectionState(null),
 
   // ── V1 Event listeners ─────────────────────────────────────────────
 

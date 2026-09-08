@@ -95,6 +95,15 @@ class BLEConnectionManager(private val context: Context) {
      *
      * For CLIENT peers: disconnects via BLEGattClient.
      * For SERVER peers: cancels the connection via GATT server.
+     *
+     * An explicit CLIENT-role disconnect emits BLE_DISCONNECTED (via the
+     * Listener → IDLE state change) because BLEGattClient removes the GATT
+     * connection entry synchronously, which suppresses the later Android
+     * DISCONNECTED callback through the stale-callback guard. Without this,
+     * JS cleanup (per-peer V8 state, BITCHAT peer registry, announced set)
+     * would never run. SERVER-role peers already emit via the platform GATT
+     * server callback, so they are not emitted here — exactly one event per
+     * peer either way.
      */
     fun disconnect(deviceId: String) {
         val peerState = peerStates[deviceId] ?: return
@@ -112,12 +121,22 @@ class BLEConnectionManager(private val context: Context) {
         }
         removePeerState(deviceId)
         syncLegacyState()
+
+        if (peerState.role == ConnectionRole.CLIENT) {
+            listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
+        }
     }
 
     /**
      * Disconnect all peers.
      */
     fun disconnectAll() {
+        // Capture CLIENT-role peer IDs before clearing: gattClient.disconnect()
+        // removes their GATT entries synchronously, which suppresses the later
+        // Android callbacks, so their disconnect events are emitted below.
+        val clientIds = peerStates.values
+            .filter { it.role == ConnectionRole.CLIENT }
+            .map { it.deviceId }
         // Disconnect all GATT client peers
         gattClient.disconnect()
         // Disconnect all GATT server peers
@@ -130,6 +149,11 @@ class BLEConnectionManager(private val context: Context) {
         }
         peerStates.clear()
         syncLegacyState()
+        // Emit one disconnect event per affected CLIENT-role peer (SERVER-role
+        // peers emit via their platform GATT server callbacks).
+        clientIds.forEach { deviceId ->
+            listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
+        }
     }
 
     /**
@@ -400,9 +424,19 @@ class BLEConnectionManager(private val context: Context) {
      * Disconnect the active GATT client connection (legacy single-peer API).
      */
     fun disconnect() {
+        // Capture CLIENT-role peer IDs before clearing: gattClient.disconnect()
+        // removes their GATT entries synchronously, which suppresses the later
+        // Android callbacks, so their disconnect events are emitted below.
+        val clientIds = peerStates.values
+            .filter { it.role == ConnectionRole.CLIENT }
+            .map { it.deviceId }
         gattClient.disconnect()
         peerStates.clear()
         syncLegacyState()
+        // Emit one disconnect event per affected CLIENT-role peer.
+        clientIds.forEach { deviceId ->
+            listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
+        }
     }
 
     /**
