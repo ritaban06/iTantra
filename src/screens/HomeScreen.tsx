@@ -183,7 +183,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
           <Text style={styles.bottomNavText}>Messages</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.bottomNavBtn} onPress={() => navigation.navigate('Connect')}>
-          <Text style={styles.bottomNavIcon}>📡</Text>
+          <Text style={styles.bottomNavIcon}>📱</Text>
           <Text style={styles.bottomNavText}>Devices</Text>
         </TouchableOpacity>
       </View>
