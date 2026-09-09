@@ -2,6 +2,7 @@ import React, { useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
+import { TX_OWNER_REMOTE } from '../protocol';
 import { useSTT } from '../hooks/useSTT';
 import { usePTT } from '../hooks/usePTT';
 import { useBLE } from '../hooks/useBLE';
@@ -22,6 +23,11 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
     voiceError,
     toggleVoiceMode,
     clearError,
+    // Half-duplex turn-taking: ownership + PTT gating.
+    txOwnership,
+    txWaitReason,
+    beginPttTurn,
+    endPttTurn,
   } = useBLEVoiceMode();
   const { languageName, languageCode, partnerLanguageName } = useLanguage();
 
@@ -83,7 +89,18 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
     }
   };
 
-  const { bg: pttBg, text: pttText, icon: pttIcon } = pttStateConfig();
+  // Half-duplex: when the remote device owns the link, WAIT is a real
+  // enforced state — PTT is disabled and STT never starts (no recording
+  // that could never be sent).
+  const remoteBusy = bleVoiceEnabled && txOwnership === TX_OWNER_REMOTE;
+  const pttDisabled =
+    appState === AppState.PROCESSING_STT ||
+    appState === AppState.PLAYING_TTS ||
+    remoteBusy;
+
+  const { bg: pttBg, text: pttText, icon: pttIcon } = remoteBusy
+    ? { bg: '#ff9500', text: txWaitReason || 'WAIT…\nOther device is transmitting', icon: '⏳' }
+    : pttStateConfig();
 
   return (
     <SafeAreaView style={styles.container}>
@@ -137,9 +154,22 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       <View style={styles.pttContainer}>
         <TouchableOpacity
           style={[styles.pttButton, { backgroundColor: pttBg, shadowColor: pttBg }]}
-          onPressIn={() => pressIn(languageCode)}
-          onPressOut={() => pressOut()}
-          disabled={appState === AppState.PROCESSING_STT || appState === AppState.PLAYING_TTS}
+          onPressIn={() => {
+            // Half-duplex gate: acquire the TX turn BEFORE recording. If the
+            // remote side is busy, pressIn never runs — no mic, no STT.
+            beginPttTurn().then((allowed) => {
+              if (allowed) {
+                pressIn(languageCode);
+              }
+            });
+          }}
+          onPressOut={() => {
+            pressOut();
+            // Turn produced no send yet — release if we still hold the lock
+            // (a successful send releases its own lock in markSent/markFailed).
+            endPttTurn();
+          }}
+          disabled={pttDisabled}
         >
           <View style={styles.pttInner}>
             <Text style={styles.pttIcon}>{pttIcon}</Text>

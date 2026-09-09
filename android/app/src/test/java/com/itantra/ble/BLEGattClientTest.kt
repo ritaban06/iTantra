@@ -330,7 +330,9 @@ class BLEGattClientTest {
         }
 
         // No peers
-        var (connected, mtuVal) = syncLegacy()
+        var result = syncLegacy()
+        var connected = result.first
+        var mtuVal = result.second
         assertFalse(connected)
         assertEquals(23, mtuVal)
 
@@ -342,7 +344,9 @@ class BLEGattClientTest {
             callback = object : android.bluetooth.BluetoothGattCallback() {},
             generation = 1
         )
-        (connected, mtuVal) = syncLegacy()
+        result = syncLegacy()
+        connected = result.first
+        mtuVal = result.second
         assertTrue(connected)
         assertEquals(512, mtuVal)
 
@@ -355,19 +359,25 @@ class BLEGattClientTest {
             generation = 2
         )
         // Legacy should reflect first connected (C)
-        (connected, mtuVal) = syncLegacy()
+        result = syncLegacy()
+        connected = result.first
+        mtuVal = result.second
         assertTrue(connected)
         assertEquals(512, mtuVal)
 
         // Remove C
         connections.remove("C")
-        (connected, mtuVal) = syncLegacy()
+        result = syncLegacy()
+        connected = result.first
+        mtuVal = result.second
         assertTrue(connected)
         assertEquals(23, mtuVal)  // Now reflects D
 
         // Remove D
         connections.remove("D")
-        (connected, mtuVal) = syncLegacy()
+        result = syncLegacy()
+        connected = result.first
+        mtuVal = result.second
         assertFalse(connected)
         assertEquals(23, mtuVal)  // Default
     }

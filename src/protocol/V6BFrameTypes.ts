@@ -35,6 +35,32 @@ export const V6B_FRAME_ACK = 0x10;
 /** Negative acknowledgment frame. Payload: 8-byte messageId + 1-byte reason. Defined only. */
 export const V6B_FRAME_NACK = 0x11;
 
+/**
+ * Half-duplex transmission-ownership control frame.
+ *
+ * Payload (all multi-byte integers BIG_ENDIAN):
+ *   Byte 0   : op            (UInt8)   — TX_OP_REQUEST / TX_OP_GRANT / TX_OP_RELEASE
+ *   Bytes 1–4: txId          (UInt32)  — owner's monotonic token for this turn
+ *   Bytes 5–8: requestId     (UInt32)  — requester-provided correlation id
+ *
+ * Total payload: 9 bytes. Direct-link control traffic — never relayed,
+ * never meshed, never treated as voice content.
+ */
+export const V6B_FRAME_TX_CONTROL = 0x12;
+
+/** Control ops (payload byte 0). */
+export const TX_OP_REQUEST = 0x01;
+export const TX_OP_GRANT = 0x02;
+export const TX_OP_RELEASE = 0x03;
+
+/** Ownership states on the local side of a direct link. */
+export const TX_OWNER_NONE = 0x00;
+export const TX_OWNER_SELF = 0x01;
+export const TX_OWNER_REMOTE = 0x02;
+
+/** TX control payload size: op(1) + txId(4) + requestId(4). */
+export const TX_CONTROL_PAYLOAD_SIZE = 9;
+
 /** Ping frame. Payload: empty. Defined only. */
 export const V6B_FRAME_PING = 0x21;
 
@@ -47,6 +73,7 @@ export const V6B_VALID_FRAME_TYPES = new Set([
   V6B_FRAME_BITCHAT,
   V6B_FRAME_ACK,
   V6B_FRAME_NACK,
+  V6B_FRAME_TX_CONTROL,
   V6B_FRAME_PING,
   V6B_FRAME_PONG,
 ]);

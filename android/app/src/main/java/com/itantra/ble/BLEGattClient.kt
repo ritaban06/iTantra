@@ -57,8 +57,37 @@ class BLEGattClient(private val context: Context) {
         @Volatile var mtu: Int = 23,
         val callback: BluetoothGattCallback,
         /** Monotonically increasing ID to detect stale callbacks. */
-        val generation: Long
+        val generation: Long,
+        /** Serialized write queue for this peer's GATT connection. */
+        val writeQueue: GattWriteQueueFacade = GattWriteQueueFacade()
     )
+
+    /**
+     * Thin facade over [GattWriteQueue] bound to one peer. Exposes a
+     * promise-style send that completes when the Android GATT write actually
+     * completes (not merely when it was accepted).
+     */
+    class GattWriteQueueFacade {
+
+        /** Result of a fully-completed write: null = success, else error string. */
+        fun enqueueWrite(write: () -> Boolean, onDone: (String?) -> Unit) {
+            GattWriteQueue.enqueue(key, write) { success ->
+                onDone(if (success) null else "WRITE_FAILED")
+            }
+        }
+
+        /** Report completion of the in-flight write (from the GATT callback). */
+        fun notifyCompleted(success: Boolean) {
+            GattWriteQueue.notifyCompleted(key, success)
+        }
+
+        /** Fail all pending writes for this peer (disconnect/teardown). */
+        fun clear() {
+            GattWriteQueue.clear(key)
+        }
+
+        private val key: String = "client-${System.identityHashCode(this)}"
+    }
 
     // ── Listener (preserved for backward compatibility) ────────────────
 
@@ -191,6 +220,9 @@ class BLEGattClient(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Error disconnecting $deviceId: ${e.message}")
         } finally {
+            // Fail any queued writes for this peer — pending send promises
+            // settle with WRITE_FAILED instead of timing out.
+            peer.writeQueue.clear()
             synchronized(connections) {
                 connections.remove(deviceId)
             }
@@ -248,9 +280,29 @@ class BLEGattClient(private val context: Context) {
         val gatt = peer.gatt ?: return "NOT_CONNECTED"
         val char = peer.txCharacteristic ?: return "TX_CHARACTERISTIC_NOT_FOUND"
 
-        char.value = data
-        val success = gatt.writeCharacteristic(char)
-        return if (success) null else "WRITE_FAILED"
+        // Enqueue the write — the queue serializes per peer and the returned
+        // promise completes on the actual onCharacteristicWrite callback, so
+        // fragment N+1 is never submitted before fragment N completed.
+        var submissionError: String? = null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        peer.writeQueue.enqueueWrite(
+            write = {
+                char.value = data
+                gatt.writeCharacteristic(char)
+            },
+            onDone = { error ->
+                submissionError = error
+                latch.countDown()
+            },
+        )
+        // GATT completion arrives on a Binder thread; wait for it so the
+        // synchronous String? contract with BLEModule is preserved.
+        return try {
+            latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            submissionError ?: "WRITE_TIMEOUT"
+        } catch (_: InterruptedException) {
+            "WRITE_TIMEOUT"
+        }
     }
 
     /**
@@ -352,6 +404,8 @@ class BLEGattClient(private val context: Context) {
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         peer.isConnected = false
+                        // Settle queued writes so no send promise hangs on a dead link.
+                        peer.writeQueue.clear()
                         val reason = if (status == BluetoothGatt.GATT_SUCCESS) "LOCAL" else "ERROR($status)"
                         Log.d(TAG, "Disconnected from $deviceId: $reason [gen=$generation]")
                         listener?.onDisconnected(deviceId, reason)
@@ -435,6 +489,10 @@ class BLEGattClient(private val context: Context) {
                 status: Int
             ) {
                 val peer = validateCallback(deviceId, generation) ?: return
+
+                // Drive the per-peer write queue: the next queued write (if any)
+                // is only submitted after this completion.
+                peer.writeQueue.notifyCompleted(status == BluetoothGatt.GATT_SUCCESS)
 
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     listener?.onError(deviceId, "WRITE_FAILED", "Characteristic write failed for $deviceId: $status")

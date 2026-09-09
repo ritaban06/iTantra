@@ -4,6 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlin.math.roundToInt
 
 /**
  * Unit tests for DeepFilterEngine streaming behavior and DSP correctness.
@@ -212,9 +213,9 @@ class DeepFilterEngineTest {
             hopsProduced++
         }
 
-        // Total: 4096/160 = 25 hops, 160 remaining.
+        // Total: 25 hops consumed (25×160 = 4000), remainder = 4096 − 4000 = 96.
         assertEquals(25, hopsProduced)
-        assertEquals(160, pendingSamples.size)
+        assertEquals(96, pendingSamples.size)
 
         // Analysis buffer should contain the last 320 samples (160 from chunk2 end + 160 zeros from hop).
         // The last non-zero sample in the analysis buffer should be from chunk2.
@@ -297,7 +298,7 @@ class DeepFilterEngineTest {
 
     @Test
     fun `clamping prevents overflow`() {
-        val hugeFloat = 10.0f
+        val hugeFloat = 40000.0f // exceeds Short.MAX_VALUE
         val intSample = hugeFloat.roundToInt()
         val shortSample = intSample.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         assertEquals(Short.MAX_VALUE, shortSample)
@@ -305,7 +306,7 @@ class DeepFilterEngineTest {
 
     @Test
     fun `clamping prevents underflow`() {
-        val hugeNegative = -10.0f
+        val hugeNegative = -40000.0f // exceeds Short.MIN_VALUE
         val intSample = hugeNegative.roundToInt()
         val shortSample = intSample.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         assertEquals(Short.MIN_VALUE, shortSample)

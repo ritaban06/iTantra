@@ -2119,3 +2119,242 @@ describe('useBLEVoiceMode — Step 11 receive-path hardening', () => {
     expect(ttsSpeakMock()).not.toHaveBeenCalled();
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// MVP hardening — ANNOUNCE bounded retry & symmetric handshake (direct A→B)
+// ═══════════════════════════════════════════════════════════════════════
+
+describe('useBLEVoiceMode — ANNOUNCE bounded retry & handshake', () => {
+  const NODE_B = '0x00000000000000bb';
+
+  const settle = async () => {
+    for (let i = 0; i < 6; i++) {
+      await act(async () => {});
+    }
+  };
+
+  const makeAnnounceBytes = (nodeId: string): Uint8Array => {
+    const remote = new BitChatBLEAdapter({
+      localNodeId: nodeId,
+      bleSend: async () => {},
+      onLocalDeliver: () => {},
+    });
+    return remote.createAnnouncePacket();
+  };
+
+  const wrapV6BBitchat = (payload: Uint8Array, seq: number = 0): string => {
+    const frame = v6bEncode(seq, V6B_FRAME_BITCHAT, payload);
+    return bytesToBase64(frame);
+  };
+
+  const announceToConnectedPeer = async (blePeerId: string, mtu: number = 512) => {
+    act(() => {
+      emitBLE('BLE_CONNECTED', { deviceId: blePeerId, mtu });
+    });
+    await settle();
+  };
+
+  const registerRemotePeer = async (blePeerId: string, remoteNodeId: string) => {
+    act(() => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: wrapV6BBitchat(makeAnnounceBytes(remoteNodeId), 0),
+        fromDevice: blePeerId,
+      });
+    });
+    await settle();
+  };
+
+  /**
+   * Count SUCCESSFUL ANNOUNCE sends to a device. A mock 'return' result only
+   * means the async send returned a promise — the CCCD-race failure rejects
+   * that promise later, so each result value is awaited to filter failures.
+   */
+  const announceSendsTo = async (deviceId: string): Promise<number> => {
+    const calls = (mockNativeBLE.send as jest.Mock).mock.calls;
+    const results = (mockNativeBLE.send as jest.Mock).mock.results;
+    let count = 0;
+    for (let i = 0; i < calls.length; i++) {
+      const result = results[i];
+      if (!result || result.type !== 'return') continue; // sync throw
+      try {
+        await result.value; // rejects → the send failed (e.g. NOTIFY_FAILED)
+      } catch {
+        continue;
+      }
+      try {
+        const bytes = base64ToBytes(calls[i][0]);
+        const frame = v6bDecode(bytes);
+        if (frame.frameType !== V6B_FRAME_BITCHAT) continue;
+        // Peer-targeted sends carry options { deviceId } as the 2nd arg.
+        const target = calls[i][1]?.deviceId ?? calls[i][1] ?? null;
+        if (deviceId !== null && target != null && target !== deviceId) continue;
+        if (bitChatDecode(frame.payload).packetType === PACKET_TYPE_ANNOUNCE) count++;
+      } catch {
+        /* not a decodable BITCHAT frame */
+      }
+    }
+    return count;
+  };
+
+  /** Count ALL ANNOUNCE send attempts to a device (successful or not). */
+  const announceAttemptsTo = (deviceId: string): number => {
+    const calls = (mockNativeBLE.send as jest.Mock).mock.calls;
+    let count = 0;
+    calls.forEach((call: any[]) => {
+      try {
+        const bytes = base64ToBytes(call[0]);
+        const frame = v6bDecode(bytes);
+        if (frame.frameType !== V6B_FRAME_BITCHAT) return;
+        const target = call[1]?.deviceId ?? call[1] ?? null;
+        if (deviceId !== null && target != null && target !== deviceId) return;
+        if (bitChatDecode(frame.payload).packetType === PACKET_TYPE_ANNOUNCE) count++;
+      } catch {
+        /* not a decodable BITCHAT frame */
+      }
+    });
+    return count;
+  };
+
+  it('failed first ANNOUNCE is retried with bounded spacing while the link stays up', async () => {
+    setStorageMode('resolve');
+    const r = await renderHook();
+    api = r.api;
+
+    // Simulate a persistently failing link: EVERY announce send fails
+    // natively (peer notifications never become ready) so the full bounded
+    // retry schedule [500ms, 1500ms, 4000ms] must play out.
+    mockNativeBLE.send.mockImplementation(async () => {
+      throw new Error('NOTIFY_FAILED');
+    });
+
+    await announceToConnectedPeer('B');
+    // Initial attempt failed; no retry has fired yet.
+    expect(announceAttemptsTo('B')).toBe(1);
+    expect(await announceSendsTo('B')).toBe(0);
+
+    // t=500ms retry fires (and also fails).
+    await act(async () => {
+      jest.advanceTimersByTime(500);
+    });
+    await settle();
+    expect(announceAttemptsTo('B')).toBe(2);
+
+    // t=1500ms retry fires.
+    await act(async () => {
+      jest.advanceTimersByTime(1500);
+    });
+    await settle();
+    expect(announceAttemptsTo('B')).toBe(3);
+
+    // t=4000ms retry fires — last one on the schedule.
+    await act(async () => {
+      jest.advanceTimersByTime(4000);
+    });
+    await settle();
+    expect(announceAttemptsTo('B')).toBe(4);
+
+    // Bounded: no further attempts after the last retry.
+    await act(async () => {
+      jest.advanceTimersByTime(20000);
+    });
+    await settle();
+    expect(announceAttemptsTo('B')).toBe(4);
+    expect(await announceSendsTo('B')).toBe(0);
+
+    // Restore the default send implementation for subsequent tests.
+    mockNativeBLE.send.mockReset();
+    mockNativeBLE.send.mockImplementation(async () => true);
+  });
+
+  it('server-role retry continues even when the BITCHAT mapping has NOT formed (link liveness, not mapping, gates retries)', async () => {
+    setStorageMode('resolve');
+    const r = await renderHook();
+    api = r.api;
+
+    // Connection up; our announce send failed (CCCD race) so the peer has
+    // NOT registered us — the BITCHAT mapping for 'B' does not exist.
+    mockNativeBLE.send.mockImplementationOnce(async () => {
+      throw new Error('NOTIFY_FAILED');
+    });
+    await announceToConnectedPeer('B');
+    expect(await announceSendsTo('B')).toBe(0);
+
+    // Retries must still fire despite the missing mapping. (The previous
+    // mapping-based liveness check aborted here — the exact bug this
+    // liveness fix closes.) The t=500ms retry goes out and succeeds —
+    // proving liveness, not mapping, gates the retry loop.
+    await act(async () => {
+      jest.advanceTimersByTime(500);
+    });
+    await settle();
+    expect(announceAttemptsTo('B')).toBe(2);
+    expect(await announceSendsTo('B')).toBe(1);
+  });
+
+  it('disconnect stops retries; reconnect restarts a fresh bounded loop', async () => {
+    setStorageMode('resolve');
+    const r = await renderHook();
+    api = r.api;
+
+    mockNativeBLE.send.mockImplementationOnce(async () => {
+      throw new Error('NOTIFY_FAILED');
+    });
+    await announceToConnectedPeer('B');
+    expect(await announceSendsTo('B')).toBe(0);
+
+    // Link drops before the first retry fires.
+    act(() => {
+      emitBLE('BLE_DISCONNECTED', { deviceId: 'B', reason: 'LOCAL' });
+    });
+    await settle();
+
+    await act(async () => {
+      jest.advanceTimersByTime(30000);
+    });
+    await settle();
+    // No retry after disconnect.
+    expect(await announceSendsTo('B')).toBe(0);
+
+    // Reconnect → fresh announce loop.
+    await announceToConnectedPeer('B');
+    expect(await announceSendsTo('B')).toBe(1);
+  });
+
+  it('incoming ANNOUNCE answers with our own ANNOUNCE; duplicate ANNOUNCE triggers no further answer (no loop)', async () => {
+    setStorageMode('resolve');
+    const r = await renderHook();
+    api = r.api;
+
+    // Both connection-time announces lost: ours fails, B never sent one.
+    mockNativeBLE.send.mockImplementationOnce(async () => {
+      throw new Error('NOTIFY_FAILED');
+    });
+    await announceToConnectedPeer('B');
+    expect(await announceSendsTo('B')).toBe(0);
+
+    // Later, B's ANNOUNCE finally arrives (its retry worked).
+    await registerRemotePeer('B', NODE_B);
+
+    // The handshake (or an in-flight retry) must have answered.
+    const afterHandshake = await announceSendsTo('B');
+    expect(afterHandshake).toBeGreaterThanOrEqual(1);
+
+    // Duplicate ANNOUNCE from B must NOT trigger another answer.
+    act(() => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: wrapV6BBitchat(makeAnnounceBytes(NODE_B), 1),
+        fromDevice: 'B',
+      });
+    });
+    await settle();
+    const afterDuplicate = await announceSendsTo('B');
+    expect(afterDuplicate).toBe(afterHandshake);
+
+    // And the bounded retry schedule adds nothing further once announced.
+    await act(async () => {
+      jest.advanceTimersByTime(20000);
+    });
+    await settle();
+    expect(await announceSendsTo('B')).toBe(afterHandshake);
+  });
+});
