@@ -121,6 +121,22 @@ class BLEGattServer(private val context: Context) {
     }
 
     /**
+     * Disconnect a specific remote client from the GATT server.
+     *
+     * Other connected clients are not affected.
+     *
+     * @param device The remote device to disconnect.
+     */
+    @SuppressLint("MissingPermission")
+    fun cancelConnection(device: BluetoothDevice) {
+        try {
+            gattServer?.cancelConnection(device)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error cancelling connection to ${device.address}: ${e.message}")
+        }
+    }
+
+    /**
      * Send a notification to a connected client.
      *
      * @return null on success, or an error string on failure.

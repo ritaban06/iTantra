@@ -39,17 +39,26 @@ class TTSModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         onStart()
 
         scope.launch {
-            val startMs = System.currentTimeMillis()
-            engine.speak(text, language)
-            val durationMs = System.currentTimeMillis() - startMs
+            try {
+                val startMs = System.currentTimeMillis()
+                engine.speak(text, language)
+                val durationMs = System.currentTimeMillis() - startMs
 
-            val finishParams = Arguments.createMap().apply {
-                putString("text", text)
-                putString("language", language)
-                putDouble("durationMs", durationMs.toDouble())
+                val finishParams = Arguments.createMap().apply {
+                    putString("text", text)
+                    putString("language", language)
+                    putDouble("durationMs", durationMs.toDouble())
+                }
+                sendEvent("TTS_FINISHED", finishParams)
+                onFinish()
+            } catch (e: Exception) {
+                val errorParams = Arguments.createMap().apply {
+                    putString("message", e.message ?: "Unknown TTS Error")
+                }
+                sendEvent("TTS_ERROR", errorParams)
+                sendEvent("TTS_FINISHED", Arguments.createMap())
+                onFinish()
             }
-            sendEvent("TTS_FINISHED", finishParams)
-            onFinish()
         }
     }
 

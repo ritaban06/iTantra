@@ -1,0 +1,21 @@
+package com.itantra.sherpa
+
+import com.facebook.react.ReactPackage
+import com.facebook.react.bridge.NativeModule
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.uimanager.ViewManager
+
+/**
+ * EXPERIMENTAL package for the sherpa-onnx Android Speech Integration Gate.
+ * Registered in MainApplication next to the production packages; the production
+ * speech modules are untouched.
+ */
+class SherpaOnnxPackage : ReactPackage {
+    override fun createNativeModules(reactContext: ReactApplicationContext): List<NativeModule> {
+        return listOf(SherpaOnnxModule(reactContext))
+    }
+
+    override fun createViewManagers(reactContext: ReactApplicationContext): List<ViewManager<*, *>> {
+        return emptyList()
+    }
+}

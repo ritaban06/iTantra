@@ -1,15 +1,12 @@
 package com.itantra.stt
 
 import android.content.Context
-import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-enum class EngineType { VOSK, INDIC_CONFORMER }
+enum class EngineType { VOSK, INDIC_CONFORMER /* deprecated — kept for type stability */ }
 
 data class LanguageConfig(
     val code: String,
@@ -28,19 +25,9 @@ object ModelManager {
             engine = EngineType.VOSK,
             modelPath = "models/stt/en/vosk-model-small-en-us",
             vocabPath = null
-        ),
-        "bn" to LanguageConfig(
-            code = "bn",
-            engine = EngineType.INDIC_CONFORMER,
-            modelPath = "models/indicconformer/bn/model.onnx",
-            vocabPath = "models/indicconformer/bn/vocab.json"
-        ),
-        "hi" to LanguageConfig(
-            code = "hi",
-            engine = EngineType.INDIC_CONFORMER,
-            modelPath = "models/indicconformer/hi/model.onnx",
-            vocabPath = "models/indicconformer/hi/vocab.json"
         )
+        // "hi" / "bn" IndicConformer configs removed — Sherpa-ONNX replaces this path.
+        // Sherpa STT handles Hindi/Bengali via its own bundled models.
     )
 
     fun getConfig(language: String): LanguageConfig? {
@@ -55,91 +42,14 @@ object ModelManager {
         return destFile.exists() || language == "en"
     }
 
-    fun getIndicConformerAbsolutePaths(context: Context, language: String): Pair<String?, String?> {
-        val config = getConfig(language) ?: return Pair(null, null)
-        val externalFilesDir = context.getExternalFilesDir(null)
-        
-        val modelFile = File(externalFilesDir, config.modelPath)
-        val vocabFile = config.vocabPath?.let { File(externalFilesDir, it) }
-
-        return if (modelFile.exists()) {
-            Pair(modelFile.absolutePath, vocabFile?.absolutePath)
-        } else {
-            Pair(null, null)
-        }
-    }
+    // getIndicConformerAbsolutePaths removed — IndicConformer path is deprecated.
+    // Sherpa-ONNX STT handles Hindi/Bengali via its own bundled models.
 
     suspend fun downloadModel(context: Context, language: String, onProgress: (Int) -> Unit) {
-        val config = getConfig(language) ?: throw Exception("Language config not found")
-        
-        if (config.engine == EngineType.VOSK) {
-            withContext(Dispatchers.Main) { onProgress(100) }
-            return
-        }
-
-        val modelUrl = "https://huggingface.co/sulabhkatiyar/indicconformer-120m-onnx/resolve/main/$language/model.onnx"
-        val vocabUrl = "https://huggingface.co/sulabhkatiyar/indicconformer-120m-onnx/resolve/main/$language/vocab.json"
-
-        val externalFilesDir = context.getExternalFilesDir(null)
-        val modelFile = File(externalFilesDir, config.modelPath)
-        val vocabFile = config.vocabPath?.let { File(externalFilesDir, it) }
-
-        modelFile.parentFile?.mkdirs()
-
-        if (vocabFile != null && !vocabFile.exists()) {
-            downloadFile(vocabUrl, vocabFile)
-        }
-
-        if (!modelFile.exists()) {
-            downloadFile(modelUrl, modelFile) { progress ->
-                onProgress(progress)
-            }
-        } else {
-            withContext(Dispatchers.Main) { onProgress(100) }
-        }
-    }
-
-    private suspend fun downloadFile(urlString: String, destFile: File, onProgress: ((Int) -> Unit)? = null) {
-        withContext(Dispatchers.IO) {
-            val url = URL(urlString)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.connect()
-
-            val fileLength = connection.contentLength
-            val input = BufferedInputStream(connection.inputStream)
-            val output = FileOutputStream(destFile)
-
-            val buffer = ByteArray(1024 * 64)
-            var totalRead = 0L
-            var count: Int
-            var lastProgress = -1
-
-            while (input.read(buffer).also { count = it } != -1) {
-                if (isDownloadCancelled) {
-                    output.close()
-                    input.close()
-                    connection.disconnect()
-                    destFile.delete()
-                    throw Exception("Download cancelled by user")
-                }
-
-                output.write(buffer, 0, count)
-                totalRead += count
-                if (fileLength > 0 && onProgress != null) {
-                    val progress = ((totalRead * 100) / fileLength).toInt()
-                    if (progress > lastProgress) {
-                        withContext(Dispatchers.Main) {
-                            onProgress(progress)
-                        }
-                        lastProgress = progress
-                    }
-                }
-            }
-            output.flush()
-            output.close()
-            input.close()
-            connection.disconnect()
-        }
+        // All runtime-downloadable IndicConformer models removed.
+        // Sherpa-ONNX bundles its models as assets.
+        // Vosk models are copied from assets on first use.
+        withContext(Dispatchers.Main) { onProgress(100) }
     }
 
     fun getVoskModelPath(context: Context, assetPath: String): String? {

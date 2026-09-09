@@ -1,11 +1,9 @@
 package com.itantra.audio
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
+// ONNX Runtime Java API removed — version conflict with sherpa-onnx's bundled ORT.
+// DeepFilterNet is gracefully disabled; audio passes through unprocessed.
 import android.content.Context
 import android.util.Log
-import java.nio.FloatBuffer
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -40,10 +38,9 @@ class DeepFilterEngine(private val context: Context) {
         private const val TAG = "DeepFilterEngine"
     }
 
-    // ── ONNX Runtime ──────────────────────────────────────────────────
-
-    private var env: OrtEnvironment? = null
-    private var session: OrtSession? = null
+    // ── ONNX Runtime (disabled — version conflict with sherpa-onnx) ──
+    // DeepFilterNet gracefully disabled; audio passes through unprocessed.
+    // To re-enable: restore the ai.onnxruntime imports and this block.
 
     @Volatile
     var isLoaded: Boolean = false
@@ -114,26 +111,11 @@ class DeepFilterEngine(private val context: Context) {
     // ── Model loading ──────────────────────────────────────────────────
 
     fun load(): Boolean {
-        if (isLoaded) return true
-        try {
-            val startTime = System.nanoTime()
-            env = OrtEnvironment.getEnvironment()
-            val modelBytes = context.assets.open(DeepFilterConfig.MODEL_ASSET_PATH)
-                .use { it.readBytes() }
-            session = env?.createSession(modelBytes, OrtSession.SessionOptions())
-            if (session == null) {
-                Log.e(TAG, "Failed to create ONNX session")
-                return false
-            }
-            val loadTimeMs = (System.nanoTime() - startTime) / 1_000_000
-            Log.i(TAG, "DPDFNet2 model loaded in ${loadTimeMs}ms")
-            isLoaded = true
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load DPDFNet2 model: ${e.message}")
-            e.printStackTrace()
-            return false
-        }
+        // ONNX Runtime Java API removed to resolve version conflict with sherpa-onnx.
+        // Audio passes through unprocessed (passthrough mode).
+        Log.i(TAG, "DeepFilterNet disabled (ONNX Runtime conflict). Audio passes through.")
+        isLoaded = false
+        return false
     }
 
     // ── Public streaming API ───────────────────────────────────────────
@@ -149,7 +131,7 @@ class DeepFilterEngine(private val context: Context) {
      */
     @Synchronized
     fun process(input: ShortArray): ShortArray {
-        if (!isLoaded || session == null) {
+        if (!isLoaded) {
             fallbackCount++
             return input
         }
@@ -202,16 +184,7 @@ class DeepFilterEngine(private val context: Context) {
 
     @Synchronized
     fun release() {
-        try {
-            session?.close()
-            env?.close()
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing ONNX resources: ${e.message}")
-        } finally {
-            session = null
-            env = null
-            isLoaded = false
-        }
+        isLoaded = false
     }
 
     // ── Hop processing (matches official C++ reference) ────────────────
@@ -319,53 +292,11 @@ class DeepFilterEngine(private val context: Context) {
         }
     }
 
-    // ── ONNX inference ─────────────────────────────────────────────────
-
-    private fun runInference(spec: FloatArray) {
-        var specTensor: OnnxTensor? = null
-        var stateTensor: OnnxTensor? = null
-        var outputs: OrtSession.Result? = null
-        try {
-            specTensor = OnnxTensor.createTensor(
-                env,
-                FloatBuffer.wrap(spec),
-                longArrayOf(1, 1, DeepFilterConfig.NUM_FREQ_BINS.toLong(), 2)
-            )
-            stateTensor = OnnxTensor.createTensor(
-                env,
-                FloatBuffer.wrap(stateIn),
-                longArrayOf(DeepFilterConfig.STATE_SIZE.toLong())
-            )
-
-            val inputs = mapOf(
-                DeepFilterConfig.INPUT_SPEC_NAME to specTensor,
-                DeepFilterConfig.INPUT_STATE_NAME to stateTensor
-            )
-            outputs = session?.run(inputs)
-            if (outputs == null) {
-                Log.e(TAG, "ONNX session.run() returned null")
-                fallbackCount++
-                return
-            }
-
-            @Suppress("UNCHECKED_CAST")
-            val specETensor = outputs[0] as OnnxTensor
-            val stateOutTensor = outputs[1] as OnnxTensor
-
-            val specE = specETensor.floatBuffer.array()
-            stateIn = stateOutTensor.floatBuffer.array().copyOf()
-
-            // Copy enhanced spectrum back into the spec array (in place).
-            for (i in specE.indices) {
-                spec[i] = specE[i]
-            }
-        } finally {
-            // Always close native ONNX resources, even on exception.
-            try { specTensor?.close() } catch (_: Exception) {}
-            try { stateTensor?.close() } catch (_: Exception) {}
-            try { outputs?.close() } catch (_: Exception) {}
-        }
-    }
+    // ── ONNX inference (disabled) ───────────────────────────────────────
+    // ONNX Runtime removed. process() falls through to passthrough when
+    // isLoaded == false, so processHop/runInference are never reached.
+    @Suppress("UNUSED_PARAMETER")
+    private fun runInference(spec: FloatArray) { /* no-op: ONNX disabled */ }
 
     // ── Vorbis window ──────────────────────────────────────────────────
 

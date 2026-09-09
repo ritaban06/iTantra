@@ -11,6 +11,8 @@ import AlertScreen from '../screens/AlertScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import BenchmarkScreen from '../screens/BenchmarkScreen';
 import LoopTestScreen from '../screens/LoopTestScreen';
+import SherpaDiagnosticScreen from '../screens/SherpaDiagnosticScreen';
+import DiagnosticsScreen from '../screens/DiagnosticsScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -43,7 +45,7 @@ export default function AppNavigator() {
         <Stack.Screen 
           name="Home" 
           component={HomeScreen} 
-          options={{ title: 'iTantra' }}
+          options={{ title: 'iTantra', headerShown: false }}
         />
         <Stack.Screen 
           name="Chat" 
@@ -79,6 +81,16 @@ export default function AppNavigator() {
           name="LoopTest" 
           component={LoopTestScreen} 
           options={{ title: 'Local Loop' }}
+        />
+        <Stack.Screen 
+          name="SherpaDiag" 
+          component={SherpaDiagnosticScreen} 
+          options={{ title: 'Speech Diagnostics (EXP)' }}
+        />
+        <Stack.Screen 
+          name="Diagnostics" 
+          component={DiagnosticsScreen} 
+          options={{ title: 'Diagnostics' }}
         />
       </Stack.Navigator>
     </NavigationContainer>

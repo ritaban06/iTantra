@@ -117,8 +117,8 @@ dependencies {
     // Vosk STT engine
     implementation 'com.alphacephei:vosk-android:0.3.47'
     
-    // ONNX Runtime for IndicConformer
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.17.3'
+
+
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

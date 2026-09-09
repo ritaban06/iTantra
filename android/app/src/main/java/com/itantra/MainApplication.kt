@@ -20,6 +20,7 @@ class MainApplication : Application(), ReactApplication {
           add(com.itantra.tts.TTSPackage())
           add(com.itantra.service.LocalLoopPackage())
           add(com.itantra.ble.BLEPackage())
+          add(com.itantra.sherpa.SherpaOnnxPackage())
         },
     )
   }
