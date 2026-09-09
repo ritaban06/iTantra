@@ -39,6 +39,10 @@ export function usePTT(useDirectSTT: boolean = false) {
         console.log('[usePTT] Received TTS_FINISHED');
         dispatch({ type: 'TTS_FINISHED' });
       }),
+      ttsEmitter.addListener('TTS_ERROR', (evt) => {
+        console.error('[usePTT] Received TTS_ERROR:', evt);
+        dispatch({ type: 'ERROR', error: evt.message });
+      }),
       sttEmitter.addListener('STT_RESULT', (evt) => {
         console.log('[usePTT] Received STT_RESULT:', evt);
         // If in Local Loop Mode and the confidence is low/empty, NativeLocalLoop will ignore it.
@@ -97,10 +101,15 @@ export function usePTT(useDirectSTT: boolean = false) {
     }
   }, []);
 
+  const reset = useCallback(() => {
+    dispatch({ type: 'TTS_FINISHED' });
+  }, []);
+
   return {
     appState: appState.state,
     error: appState.error,
     pressIn,
     pressOut,
+    reset,
   };
 }

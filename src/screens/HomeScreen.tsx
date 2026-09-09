@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, PermissionsAndroid, Platform, Modal } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSTT } from '../hooks/useSTT';
 import { usePTT } from '../hooks/usePTT';
 import { useBLE } from '../hooks/useBLE';
@@ -24,7 +25,15 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
   } = useBLEVoiceMode();
   const { languageName, languageCode, partnerLanguageName } = useLanguage();
 
-  const { appState, error: pttError, pressIn, pressOut } = usePTT(bleVoiceEnabled);
+  const { appState, error: pttError, pressIn, pressOut, reset } = usePTT(bleVoiceEnabled);
+
+  useFocusEffect(
+    useCallback(() => {
+      // Force reset PTT state when returning to the Home screen (e.g., from Alert screen)
+      // to clear any stuck 'PLAYING_TTS' state caused by global TTS events.
+      reset();
+    }, [reset])
+  );
 
   const error = sttError || pttError || voiceError;
 
