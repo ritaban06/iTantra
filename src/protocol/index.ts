@@ -94,6 +94,7 @@ export type {
 
 export {
   splitV6A,
+  splitV6AForBudget,
   parseHeader,
 } from './FragmentCodec';
 
@@ -133,3 +134,20 @@ export { ReliabilityManager } from './ReliabilityManager';
 export type { SendResult } from './ReliabilityManager';
 export { DeliveredMessageCache } from './DeliveredMessageCache';
 export { CompletedGroupCache } from './CompletedGroupCache';
+export {
+  encodeTxControlPayload,
+  decodeTxControlPayload,
+  buildTxControlFrame,
+  isGrantAccepted,
+} from './TxControlCodec';
+export type { TxControlPayload } from './TxControlCodec';
+export {
+  V6B_FRAME_TX_CONTROL,
+  TX_OP_REQUEST,
+  TX_OP_GRANT,
+  TX_OP_RELEASE,
+  TX_OWNER_NONE,
+  TX_OWNER_SELF,
+  TX_OWNER_REMOTE,
+  TX_CONTROL_PAYLOAD_SIZE,
+} from './V6BFrameTypes';

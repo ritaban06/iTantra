@@ -115,6 +115,8 @@ class BLEGattServer(private val context: Context) {
         } finally {
             gattServer = null
             isRunning = false
+            // Fail any queued notifications — nothing can complete after stop().
+            GattWriteQueue.clearAll()
         }
         Log.d(TAG, "GATT server stopped")
         return null
@@ -151,9 +153,24 @@ class BLEGattServer(private val context: Context) {
         val rxChar = service.getCharacteristic(BLEConstants.RX_CHAR_UUID)
             ?: return "RX_CHARACTERISTIC_NOT_FOUND"
 
-        rxChar.value = data
-        val success = server.notifyCharacteristicChanged(device, rxChar, false)
-        return if (success) null else "NOTIFY_FAILED"
+        // Serialize notifications per remote device — a new notify must not be
+        // issued until the previous onNotificationSent completed. Completion
+        // settles the synchronous String? contract via a latch.
+        var result: String? = null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        GattWriteQueue.enqueue(device.address, write = {
+            rxChar.value = data
+            server.notifyCharacteristicChanged(device, rxChar, false)
+        }) { success ->
+            result = if (success) null else "NOTIFY_FAILED"
+            latch.countDown()
+        }
+        return try {
+            latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            result ?: "NOTIFY_TIMEOUT"
+        } catch (_: InterruptedException) {
+            "NOTIFY_TIMEOUT"
+        }
     }
 
     /** Get all currently connected client devices. */
@@ -175,6 +192,8 @@ class BLEGattServer(private val context: Context) {
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     synchronized(connectedClients) { connectedClients.remove(device) }
+                    // Settle queued notifications so no send promise hangs.
+                    GattWriteQueue.clear(device.address)
                     Log.d(TAG, "Client disconnected: ${device.address}")
                     listener?.onClientDisconnected(device)
                 }
@@ -216,6 +235,9 @@ class BLEGattServer(private val context: Context) {
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            // Drive the per-peer notification queue: the next notify (if any)
+            // is only submitted after this completion.
+            GattWriteQueue.notifyCompleted(device.address, status == BluetoothGatt.GATT_SUCCESS)
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "Notification failed to ${device.address}: $status")
             }

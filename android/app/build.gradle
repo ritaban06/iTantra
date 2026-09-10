@@ -117,6 +117,8 @@ dependencies {
     // Vosk STT engine
     implementation 'com.alphacephei:vosk-android:0.3.47'
     
+    // JVM unit tests (test-only — never packaged into the APK)
+    testImplementation 'junit:junit:4.13.2'
 
 
 

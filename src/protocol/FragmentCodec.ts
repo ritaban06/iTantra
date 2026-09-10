@@ -110,6 +110,86 @@ export function splitV6A(v6aPacket: Uint8Array): FragmentChunk[] {
   return chunks;
 }
 
+/**
+ * Split a V6A packet into V7 fragments under a caller-supplied per-frame
+ * byte budget (e.g. when an additional outer header — such as the 28-byte
+ * BITCHAT envelope — shares the V6B payload space).
+ *
+ * Behavior mirrors [splitV6A] except that the fragment payload budget is
+ * parameterized: each emitted fragment is ≤ maxChunkBytes bytes TOTAL
+ * (V7 header + V6A data).
+ *
+ * @param v6aPacket     Complete V6A binary packet.
+ * @param maxChunkBytes Maximum total bytes per fragment (header included).
+ * @returns Array of FragmentChunk (empty if no fragmentation needed).
+ * @throws {V7FragmentError} if the budget is too small, the packet exceeds
+ *         MAX_V6A_LENGTH, or the fragment count exceeds MAX_FRAGMENTS.
+ */
+export function splitV6AForBudget(v6aPacket: Uint8Array, maxChunkBytes: number): FragmentChunk[] {
+  if (maxChunkBytes < V7_HEADER_SIZE + 1) {
+    throw new V7FragmentError(
+      `Chunk budget too small: ${maxChunkBytes} bytes (minimum ${V7_HEADER_SIZE + 1})`,
+      'BUDGET_TOO_SMALL',
+    );
+  }
+
+  // Clamp to the transport-wide maximum chunk size.
+  const effectiveChunk = Math.min(maxChunkBytes, V7_HEADER_SIZE + MAX_CHUNK_SIZE);
+  const dataBytesPerFragment = effectiveChunk - V7_HEADER_SIZE;
+
+  // Single-frame: no V7 header needed.
+  if (v6aPacket.length <= dataBytesPerFragment) {
+    return [];
+  }
+
+  // Validate maximum V6A length.
+  if (v6aPacket.length > MAX_V6A_LENGTH) {
+    throw new V7FragmentError(
+      `V6A packet too large for V7 fragmentation: ${v6aPacket.length} bytes (max ${MAX_V6A_LENGTH})`,
+      'V6A_TOO_LARGE',
+    );
+  }
+
+  // Calculate fragment count.
+  const totalFragments = Math.ceil(v6aPacket.length / dataBytesPerFragment);
+  if (totalFragments > MAX_FRAGMENTS) {
+    throw new V7FragmentError(
+      `Fragment count exceeds maximum: ${totalFragments} (max ${MAX_FRAGMENTS})`,
+      'TOO_MANY_FRAGMENTS',
+    );
+  }
+
+  // Allocate a new group ID.
+  const groupId = groupIdCounter >>> 0;
+  groupIdCounter = ((groupIdCounter + 1) & UINT32_MAX) >>> 0;
+
+  // Split into chunks.
+  const chunks: FragmentChunk[] = [];
+  const v6aLength = v6aPacket.length;
+
+  for (let i = 0; i < totalFragments; i++) {
+    const offset = i * dataBytesPerFragment;
+    const chunkSize = Math.min(dataBytesPerFragment, v6aLength - offset);
+    const v6aChunk = v6aPacket.slice(offset, offset + chunkSize);
+
+    const header: FragmentHeader = {
+      marker: V7_MARKER,
+      groupId,
+      fragmentIndex: i,
+      totalFragments,
+      v6aLength,
+    };
+
+    const payload = new Uint8Array(V7_HEADER_SIZE + chunkSize);
+    writeHeader(payload, header);
+    payload.set(v6aChunk, V7_HEADER_SIZE);
+
+    chunks.push({ payload, header });
+  }
+
+  return chunks;
+}
+
 // ── Parse Header ──────────────────────────────────────────────────
 
 /**

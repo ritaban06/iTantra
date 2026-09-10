@@ -169,10 +169,10 @@ export class RelayEngine {
    *
    * @param packet  The locally-originated BitChat packet.
    */
-  async originate(packet: BitChatPacket): Promise<void> {
+  async originate(packet: BitChatPacket): Promise<number> {
     // Validate
     if (!packet.sourceNodeId || !packet.packetId) {
-      return;
+      return 0;
     }
 
     // Mark seen in DedupCache
@@ -180,7 +180,7 @@ export class RelayEngine {
 
     // Check TTL
     if (packet.ttl <= 0) {
-      return; // TTL exhausted — nothing to forward
+      return 0; // TTL exhausted — nothing to forward
     }
 
     // Decrement TTL for forwarded copy
@@ -190,7 +190,8 @@ export class RelayEngine {
     const relayPeers = this.router.getRelayPeers();
 
     if (relayPeers.length === 0) {
-      return;
+      console.warn('[RelayEngine] originate: no connected relay peers — packet not transmitted');
+      return 0;
     }
 
     // Create forwarded packet
@@ -205,17 +206,22 @@ export class RelayEngine {
       payload: packet.payload,
     };
 
-    // Forward independently
+    // Forward independently — one failure does not block others
     const results = await Promise.allSettled(
       relayPeers.map(peerId => this.sendToPeer(peerId, forwarded)),
     );
 
+    // Count actual successful transmissions for honest send reporting.
+    let forwardedCount = 0;
     results.forEach((result, i) => {
       if (result.status === 'rejected') {
         console.warn(
           `[RelayEngine] Failed to relay originated packet to ${relayPeers[i]}: ${result.reason}`,
         );
+      } else {
+        forwardedCount++;
       }
     });
+    return forwardedCount;
   }
 }

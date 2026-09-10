@@ -64,6 +64,12 @@ export interface BitChatBLEAdapterParams {
   bleSend: BleSendFn;
   /** Callback for locally-delivered payloads (V6B frames). */
   onLocalDeliver: LocalDeliverFn;
+  /**
+   * Optional callback fired when a valid ANNOUNCE is received from a BLE peer.
+   * Used by the integration layer to answer with its own ANNOUNCE so peer
+   * registration becomes symmetric even if a connection-time ANNOUNCE was lost.
+   */
+  onAnnounceReceived?: AnnounceReceivedFn;
 }
 
 /** Mapping from BITCHAT NodeId to BLE peer ID string. */
@@ -72,12 +78,16 @@ interface PeerMapping {
   bitchatNodeId: NodeId;
 }
 
+/** Optional callback invoked when a valid ANNOUNCE is received from a BLE peer. */
+export type AnnounceReceivedFn = (blePeerId: string, remoteNodeId: NodeId) => void;
+
 // ── Adapter ──────────────────────────────────────────────────────
 
 export class BitChatBLEAdapter {
   private readonly localNodeId: NodeId;
   private readonly bleSend: BleSendFn;
   private readonly onLocalDeliver: LocalDeliverFn;
+  private readonly onAnnounceReceived?: AnnounceReceivedFn;
 
   /** BITCHAT mesh components. */
   readonly peerRegistry: PeerRegistry;
@@ -102,6 +112,7 @@ export class BitChatBLEAdapter {
     this.localNodeId = normalizeNodeId(params.localNodeId);
     this.bleSend = params.bleSend;
     this.onLocalDeliver = params.onLocalDeliver;
+    this.onAnnounceReceived = params.onAnnounceReceived;
 
     // Initialize BITCHAT mesh components
     this.peerRegistry = new PeerRegistry();
@@ -109,12 +120,13 @@ export class BitChatBLEAdapter {
     this.meshRouter = new MeshRouter(this.localNodeId, this.peerRegistry);
     this.discoveryRegistry = new MeshDiscoveryRegistry();
 
-    // sendToPeer: maps BITCHAT NodeId → BLE peer ID → bleSend
+    // sendToPeer: maps BITCHAT NodeId → BLE peer ID → bleSend.
+    // A missing mapping or failed transmission THROWS so RelayEngine counts
+    // this peer as not-forwarded (honest originate result).
     const sendToPeer = async (peerId: NodeId, packet: BitChatPacket): Promise<void> => {
       const mapping = this.reverseMappings.get(peerId);
       if (!mapping) {
-        console.warn(`[BitChatAdapter] No BLE mapping for peer ${peerId}`);
-        return;
+        throw new Error(`No BLE mapping for peer ${peerId}`);
       }
       const encoded = bitChatEncode(packet);
       await this.bleSend(mapping.blePeerId, encoded);
@@ -223,7 +235,20 @@ export class BitChatBLEAdapter {
     if (!remoteNodeId) {
       return null;
     }
+    const isNewPeer = !this.peerMappings.has(blePeerId);
     this.registerPeer(blePeerId, remoteNodeId);
+    // V9E-announce-heal: let the integration layer answer with its own
+    // ANNOUNCE (bounded retry in the hook) so registration is symmetric
+    // even when the peer's connection-time ANNOUNCE was lost (e.g. sent
+    // before notifications/CCCD were ready). Duplicate ANNOUNCEs are
+    // harmless: registerPeer is idempotent for the same mapping.
+    if (isNewPeer && this.onAnnounceReceived) {
+      try {
+        this.onAnnounceReceived(blePeerId, remoteNodeId);
+      } catch {
+        // Callback errors must never break packet processing.
+      }
+    }
     return remoteNodeId;
   }
 
@@ -354,7 +379,7 @@ export class BitChatBLEAdapter {
     packetId: PacketId,
     destinationNodeId: NodeId = NODE_ID_BROADCAST,
     ttl: number = DEFAULT_TTL,
-  ): Promise<void> {
+  ): Promise<number> {
     this.originatedPacketId = packetId;
 
     const packet: BitChatPacket = {
@@ -368,7 +393,7 @@ export class BitChatBLEAdapter {
       payload,
     };
 
-    await this.relayEngine.originate(packet);
+    return await this.relayEngine.originate(packet);
   }
 
   /**
