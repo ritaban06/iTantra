@@ -425,10 +425,10 @@ export class ReliabilityManager {
 
   static parseNackPayload(payload: Uint8Array): { groupId: number; reason: number } | null {
     if (payload.length < NACK_PAYLOAD_SIZE) return null;
-    const groupId = ((payload[0] & 0xff) << 24) |
-                    ((payload[1] & 0xff) << 16) |
-                    ((payload[2] & 0xff) << 8) |
-                    (payload[3] & 0xff);
+    const groupId = (((payload[0] & 0xff) << 24) |
+      ((payload[1] & 0xff) << 16) |
+      ((payload[2] & 0xff) << 8) |
+      (payload[3] & 0xff)) >>> 0;
     const reason = payload[4];
     return { groupId, reason };
   }

@@ -17,6 +17,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import {
   useBLEVoiceMode,
 } from '../useBLEVoiceMode';
+import ChatScreen from '../../screens/ChatScreen';
 import {
   v6bEncode,
   v6bDecode,
@@ -33,6 +34,9 @@ import {
   ReliabilityManager,
   encodeUnrestricted,
   decodeWithFallback,
+  splitV6AForBudget,
+  V6B_MAX_PAYLOAD_SIZE,
+  V7_HEADER_SIZE,
   buildTxControlFrame,
   decodeTxControlPayload,
 } from '../../protocol';
@@ -47,11 +51,20 @@ import {
   PACKET_TYPE_DISCOVERY,
   DEFAULT_TTL,
   FLAGS_NONE,
+  HEADER_SIZE as BITCHAT_HEADER_SIZE,
   NODE_ID_BROADCAST,
   normalizeNodeId,
   normalizePacketId,
 } from '../../BITCHAT';
 import type { BitChatPacket } from '../../BITCHAT';
+import {
+  decodeChatApplicationPayload,
+  encodeChatApplicationPayload,
+  getChatSnapshot,
+  isChatTransportReady,
+  resetChatMessageService,
+  resetChatMessageStore,
+} from '../../messages';
 import {
   getVoiceDestinationNodeId,
   setVoiceDestinationNodeId,
@@ -102,6 +115,9 @@ jest.mock('react-native', () => {
     }
   }
 
+  const React = require('react');
+  const host = (name: string) => (props: any) => React.createElement(name, props, props.children);
+
   return {
     NativeEventEmitter: MockSttEmitter,
     NativeModules: {
@@ -131,7 +147,26 @@ jest.mock('react-native', () => {
       storageMap = map;
     },
     __getStorageMap: () => ({ ...storageMap }),
+    FlatList: ({ data = [], renderItem, ListEmptyComponent, ...props }: any) => React.createElement(
+      'FlatList',
+      props,
+      data.length
+        ? data.map((item: any, index: number) => React.cloneElement(renderItem({ item, index }), { key: index }))
+        : ListEmptyComponent,
+    ),
+    KeyboardAvoidingView: host('KeyboardAvoidingView'),
+    Platform: { OS: 'android' },
+    StyleSheet: { create: (styles: any) => styles },
+    Text: host('Text'),
+    TextInput: host('TextInput'),
+    TouchableOpacity: host('TouchableOpacity'),
+    View: host('View'),
   };
+});
+
+jest.mock('react-native-safe-area-context', () => {
+  const React = require('react');
+  return { SafeAreaView: (props: any) => React.createElement('SafeAreaView', props, props.children) };
 });
 
 const rnMock: any = jest.requireMock('react-native');
@@ -342,6 +377,22 @@ async function renderHook() {
   };
 }
 
+/** Mount the real hook and ChatScreen together; no chat transport is injected. */
+async function renderChatWithProductionHook() {
+  const apiRef: { current: HookApi | null } = { current: null };
+  let renderer!: TestRenderer.ReactTestRenderer;
+  const Harness = () => {
+    apiRef.current = useBLEVoiceMode('en');
+    return <ChatScreen />;
+  };
+
+  await act(async () => {
+    renderer = TestRenderer.create(<Harness />);
+  });
+  await act(async () => {});
+  return { renderer, api: () => apiRef.current! };
+}
+
 /** Enable voice mode targeting a connected BLE peer (deviceId). */
 async function enableVoice(deviceId: string) {
   setConnectionInfo({ state: 'CONNECTED', deviceId, mtu: 512 });
@@ -386,6 +437,8 @@ beforeEach(() => {
   setPeerConnectionInfo({});
   mockNativeSTT.muteMic.mockClear();
   mockNativeSTT.unmuteMic.mockClear();
+  resetChatMessageStore();
+  resetChatMessageService();
 });
 
 afterEach(() => {
@@ -1156,6 +1209,101 @@ describe('useBLEVoiceMode — Step 7 BITCHAT peer-targeted transport', () => {
 
   const ttsSpeakMock = () => (rnMock.NativeModules.NativeTTS.speak as jest.Mock);
 
+  it('REAL PRODUCTION COMPOSITION: ChatScreen sends through the mounted hook binding, adapter, V6B, and NativeBLE boundary', async () => {
+    setStorageMode('resolve');
+    setStorageMap({ bitchat_node_id: '0x00000000000000a1' });
+    const mounted = await renderChatWithProductionHook();
+    api = mounted.api;
+
+    await announceToConnectedPeer('C');
+    await registerRemotePeer('C', NODE_X);
+    clearSendCalls();
+
+    // This can become true only when the mounted production hook has bound
+    // ChatMessageService to its adapter and the native ANNOUNCE path has
+    // registered NODE_X behind BLE peer C. The test never injects either.
+    expect(isChatTransportReady(NODE_X)).toBe(true);
+    expect(mounted.renderer.root.findByProps({ testID: `chat-peer-${NODE_X}` })).toBeTruthy();
+    await act(async () => {
+      mounted.renderer.root.findByProps({ testID: `chat-peer-${NODE_X}` }).props.onPress();
+    });
+    const text = 'production-bound fragmented chat '.repeat(30).trim();
+    await act(async () => {
+      mounted.renderer.root.findByProps({ testID: 'chat-input' }).props.onChangeText(text);
+    });
+    await act(async () => {
+      await mounted.renderer.root.findByProps({ testID: 'chat-send' }).props.onPress();
+    });
+
+    expect(mockNativeBLE.send.mock.calls.length).toBeGreaterThan(1);
+    expect(mockNativeBLE.send.mock.calls).toEqual(expect.arrayContaining([
+      [expect.any(String), 'C', expect.any(String)],
+    ]));
+    const chatPayloads = mockNativeBLE.send.mock.calls.map(([base64]: [string]) => {
+      const { envelope } = decodeBitchatFrame(base64);
+      expect(envelope).toEqual(expect.objectContaining({
+        sourceNodeId: '0x00000000000000a1',
+        destinationNodeId: NODE_X,
+        packetType: PACKET_TYPE_DATA,
+      }));
+      const chatPayload = decodeChatApplicationPayload(envelope.payload);
+      expect(chatPayload).not.toBeNull();
+      expect(chatPayload![0]).toBe(V7_MARKER);
+      return chatPayload!;
+    });
+    const orderedPayloads = [...chatPayloads].sort((left, right) => (
+      parseHeader(left).fragmentIndex - parseHeader(right).fragmentIndex
+    ));
+    const firstHeader = parseHeader(orderedPayloads[0]);
+    expect(orderedPayloads.map(payload => parseHeader(payload).fragmentIndex))
+      .toEqual(Array.from({ length: firstHeader.totalFragments }, (_, index) => index));
+    const v6a = new Uint8Array(firstHeader.v6aLength);
+    let offset = 0;
+    for (const payload of orderedPayloads) {
+      const body = payload.slice(V7_HEADER_SIZE);
+      v6a.set(body, offset);
+      offset += body.length;
+    }
+    expect(offset).toBe(firstHeader.v6aLength);
+    expect(decodeWithFallback(v6a)).toEqual(expect.objectContaining({ text }));
+    expect(getChatSnapshot().messages).toEqual([
+      expect.objectContaining({ status: 'SENT', recipientNodeId: NODE_X, text }),
+    ]);
+
+    await act(async () => { mounted.renderer.unmount(); });
+  });
+
+  it('REAL PRODUCTION COMPOSITION: a NativeBLE rejection becomes FAILED and is rendered by ChatScreen', async () => {
+    setStorageMode('resolve');
+    setStorageMap({ bitchat_node_id: '0x00000000000000a1' });
+    const mounted = await renderChatWithProductionHook();
+    api = mounted.api;
+
+    await announceToConnectedPeer('C');
+    await registerRemotePeer('C', NODE_X);
+    clearSendCalls();
+    mockNativeBLE.send.mockRejectedValueOnce(new Error('WRITE_FAILED'));
+
+    await act(async () => {
+      mounted.renderer.root.findByProps({ testID: `chat-peer-${NODE_X}` }).props.onPress();
+    });
+    await act(async () => {
+      mounted.renderer.root.findByProps({ testID: 'chat-input' }).props.onChangeText('must fail visibly');
+    });
+    await act(async () => {
+      await mounted.renderer.root.findByProps({ testID: 'chat-send' }).props.onPress();
+    });
+
+    expect(mockNativeBLE.send).toHaveBeenCalledTimes(1);
+    expect(getChatSnapshot().messages).toEqual([
+      expect.objectContaining({ status: 'FAILED', text: 'must fail visibly' }),
+    ]);
+    expect(mounted.renderer.root.findAllByProps({ children: 'No mesh peer accepted the message' }).length).toBeGreaterThan(0);
+    expect(getChatSnapshot().messages[0].status).not.toBe('SENT');
+
+    await act(async () => { mounted.renderer.unmount(); });
+  });
+
   it('1-3/21-22. ANNOUNCE registers the peer; mesh originate sends exactly one peer-targeted BITCHAT frame', async () => {
     setStorageMode('resolve');
     const r = await renderHook();
@@ -1244,6 +1392,88 @@ describe('useBLEVoiceMode — Step 7 BITCHAT peer-targeted transport', () => {
     expect(cEnv.sourceNodeId).toBe(dEnv.sourceNodeId);
     expect(cEnv.ttl).toBe(DEFAULT_TTL - 1);
     expect(dEnv.ttl).toBe(DEFAULT_TTL - 1);
+  });
+
+  it('REAL APPLICATION INTEGRATION: typed chat bypasses TTS while normal and fragmented voice retain TTS, including fragmented typed-chat reassembly', async () => {
+    setStorageMode('resolve');
+    const r = await renderHook();
+    api = r.api;
+    await announceToConnectedPeer('C');
+    await enableVoice('C');
+    await settle();
+    const localNodeId = decodeBitchatFrame(decodeSendsTo('C')[0].base64).envelope.sourceNodeId;
+    await registerRemotePeer('C', NODE_X);
+
+    const deliver = async (packetId: bigint, payload: Uint8Array) => {
+      act(() => {
+        emitBLE('BLE_DATA_RECEIVED', {
+          data: wrapV6BBitchat(dataEnvelope({
+            sourceNodeId: NODE_X,
+            destinationNodeId: localNodeId,
+            packetId,
+            ttl: DEFAULT_TTL,
+            payload,
+          }), 0),
+          fromDevice: 'C',
+        });
+      });
+      await settle();
+    };
+
+    // CASE A: typed-chat application envelope reaches the chat store but
+    // returns before the existing voice decoder/TTS invocation.
+    const typed = semanticPayload('typed chat does not speak');
+    ttsSpeakMock().mockClear();
+    await deliver(BigInt(7400), encodeChatApplicationPayload(typed.v6a));
+    expect(ttsSpeakMock()).not.toHaveBeenCalled();
+    expect(getChatSnapshot().messages).toEqual([
+      expect.objectContaining({
+        senderNodeId: NODE_X,
+        recipientNodeId: localNodeId,
+        text: 'typed chat does not speak',
+      }),
+    ]);
+
+    // CASE B: an ordinary voice payload follows its established processing
+    // path, reaches TTS, and creates no typed-chat bubble.
+    const voice = semanticPayload('voice still speaks');
+    await deliver(BigInt(7401), voice.v6a);
+    expect(ttsSpeakMock()).toHaveBeenCalledWith('voice still speaks', 'en', false);
+    expect(getChatSnapshot().messages).toHaveLength(1);
+
+    // CASE C: out-of-order typed-chat V7 fragments are reassembled by the
+    // chat application layer only.
+    const fragmentedChat = semanticPayload('c'.repeat(1200));
+    const chatFragments = splitV6AForBudget(
+      fragmentedChat.v6a,
+      V6B_MAX_PAYLOAD_SIZE - BITCHAT_HEADER_SIZE - 4,
+    );
+    expect(chatFragments.length).toBeGreaterThan(1);
+    ttsSpeakMock().mockClear();
+    for (const [index, fragment] of [...chatFragments].reverse().entries()) {
+      await deliver(BigInt(7410 + index), encodeChatApplicationPayload(fragment.payload));
+      if (index < chatFragments.length - 1) expect(getChatSnapshot().messages).toHaveLength(1);
+    }
+    expect(ttsSpeakMock()).not.toHaveBeenCalled();
+    expect(getChatSnapshot().messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ text: 'c'.repeat(1200), status: 'RECEIVED' }),
+    ]));
+
+    // CASE D: raw V7 voice fragments remain owned by the pre-existing voice
+    // reassembler and reach TTS, never becoming a chat record.
+    const fragmentedVoice = semanticPayload('v'.repeat(1200));
+    const voiceFragments = splitV6AForBudget(
+      fragmentedVoice.v6a,
+      V6B_MAX_PAYLOAD_SIZE - BITCHAT_HEADER_SIZE,
+    );
+    expect(voiceFragments.length).toBeGreaterThan(1);
+    const chatCountBeforeVoice = getChatSnapshot().messages.length;
+    ttsSpeakMock().mockClear();
+    for (const [index, fragment] of voiceFragments.entries()) {
+      await deliver(BigInt(7420 + index), fragment.payload);
+    }
+    expect(ttsSpeakMock()).toHaveBeenCalledWith('v'.repeat(1200), 'en', false);
+    expect(getChatSnapshot().messages).toHaveLength(chatCountBeforeVoice);
   });
 
   it('relay: inbound broadcast DATA from C is delivered locally AND forwarded to D with targeting', async () => {

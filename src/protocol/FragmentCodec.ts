@@ -22,13 +22,48 @@ import {
 
 const UINT32_MAX = 0xffffffff;
 
-let groupIdCounter = 0;
+/**
+ * A V7 group ID is only 32 bits, so it cannot itself encode an unbounded
+ * message identity.  Start each JavaScript process at an unpredictable point
+ * in that space instead of at zero.  Combined with the per-process monotonic
+ * counter this prevents a normal app restart from reusing an in-flight group
+ * ID for the same source during the receiver's reassembly window.
+ */
+function createProcessGroupIdSeed(): number {
+  const cryptoApi = (globalThis as typeof globalThis & {
+    crypto?: { getRandomValues?: (array: Uint32Array) => Uint32Array };
+  }).crypto;
+  if (cryptoApi?.getRandomValues) {
+    const random = new Uint32Array(1);
+    cryptoApi.getRandomValues(random);
+    return random[0] >>> 0;
+  }
+
+  // React Native environments without Web Crypto still get independent
+  // process starts in practice. Date entropy prevents a deterministic reset;
+  // Math.random contributes the remaining 32-bit spread.
+  const now = Date.now();
+  return ((now ^ Math.floor(now / 0x100000000)) ^ Math.floor(Math.random() * 0x100000000)) >>> 0;
+}
+
+let groupIdCounter = createProcessGroupIdSeed();
 
 /**
  * Reset the group ID counter (for testing).
  */
 export function resetGroupIdCounter(): void {
   groupIdCounter = 0;
+}
+
+/**
+ * Test-only simulation of a new JavaScript process. Production initialization
+ * uses [createProcessGroupIdSeed] when this module is loaded.
+ */
+export function restartGroupIdCounterForTests(seed: number): void {
+  if (!Number.isInteger(seed) || seed < 0 || seed > UINT32_MAX) {
+    throw new Error(`Invalid group ID process seed: ${seed}`);
+  }
+  groupIdCounter = seed >>> 0;
 }
 
 /**
@@ -281,7 +316,7 @@ function readUInt32BE(buf: Uint8Array, offset: number): number {
     ((buf[offset + 1] & 0xff) << 16) |
     ((buf[offset + 2] & 0xff) << 8) |
     (buf[offset + 3] & 0xff)
-  );
+  ) >>> 0;
 }
 
 function writeUInt16BE(buf: Uint8Array, offset: number, value: number): void {

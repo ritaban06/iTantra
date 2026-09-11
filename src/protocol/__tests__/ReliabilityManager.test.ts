@@ -680,6 +680,15 @@ describe('Malformed / Abuse', () => {
     expect(parsed.reason).toBe(0xFF);
   });
 
+  it('preserves high-bit V7 group IDs as unsigned UInt32 values for NACK lookup', () => {
+    const groupId = 0xe1234567;
+    const payload = ReliabilityManager.buildNackPayload(groupId, NACK_REASON_INVALID_FRAGMENT);
+    expect(ReliabilityManager.parseNackPayload(payload)).toEqual({
+      groupId,
+      reason: NACK_REASON_INVALID_FRAGMENT,
+    });
+  });
+
   it('repeated NACKs eventually exhaust retry budget (cannot cause unlimited retries)', () => {
     const mgr = new ReliabilityManager('peer_A', new SequenceManager(0));
     const events: any[] = [];
