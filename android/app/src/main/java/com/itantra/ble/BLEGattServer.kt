@@ -27,8 +27,8 @@ class BLEGattServer(private val context: Context) {
     }
 
     interface Listener {
-        fun onClientConnected(device: BluetoothDevice)
-        fun onClientDisconnected(device: BluetoothDevice)
+        fun onClientConnected(device: BluetoothDevice, generation: Long)
+        fun onClientDisconnected(device: BluetoothDevice, generation: Long)
         fun onDataReceived(data: ByteArray, device: BluetoothDevice)
     }
 
@@ -37,6 +37,7 @@ class BLEGattServer(private val context: Context) {
 
     private var gattServer: BluetoothGattServer? = null
     private val connectedClients = mutableSetOf<BluetoothDevice>()
+    private val connectionGuard = ServerConnectionGuard()
 
     var listener: Listener? = null
 
@@ -109,6 +110,7 @@ class BLEGattServer(private val context: Context) {
                 } catch (_: Exception) {}
             }
             connectedClients.clear()
+            connectionGuard.clear()
             gattServer?.close()
         } catch (e: Exception) {
             return "STOP_SERVER_ERROR: ${e.message}"
@@ -145,6 +147,10 @@ class BLEGattServer(private val context: Context) {
      */
     @SuppressLint("MissingPermission")
     fun sendNotification(data: ByteArray, device: BluetoothDevice): String? {
+        if (getConnectedDevices().none { addressesEqual(it.address, device.address) }) {
+            Log.w(TAG, "sendNotification rejected: ${device.address} is not a current server client")
+            return "NOT_CONNECTED"
+        }
         val server = gattServer ?: return "SERVER_NOT_RUNNING"
 
         val service = server.getService(BLEConstants.SERVICE_UUID)
@@ -186,16 +192,25 @@ class BLEGattServer(private val context: Context) {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    val generation = connectionGuard.markConnected(device.address, device)
                     synchronized(connectedClients) { connectedClients.add(device) }
-                    Log.d(TAG, "Client connected: ${device.address}")
-                    listener?.onClientConnected(device)
+                    Log.d(TAG, "Client connected: ${device.address} [gen=$generation]")
+                    listener?.onClientConnected(device, generation)
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
+                    val generation = connectionGuard.processDisconnect(device.address, device)
+                    if (generation == null) {
+                        Log.w(
+                            TAG,
+                            "Ignoring stale/duplicate disconnect for ${device.address}"
+                        )
+                        return
+                    }
                     synchronized(connectedClients) { connectedClients.remove(device) }
                     // Settle queued notifications so no send promise hangs.
                     GattWriteQueue.clear(device.address)
-                    Log.d(TAG, "Client disconnected: ${device.address}")
-                    listener?.onClientDisconnected(device)
+                    Log.d(TAG, "Client disconnected: ${device.address} [gen=$generation]")
+                    listener?.onClientDisconnected(device, generation)
                 }
             }
         }
@@ -247,4 +262,7 @@ class BLEGattServer(private val context: Context) {
             Log.d(TAG, "MTU changed for ${device.address}: $mtu")
         }
     }
+
+    private fun addressesEqual(first: String?, second: String?): Boolean =
+        first?.trim()?.equals(second?.trim(), ignoreCase = true) == true
 }

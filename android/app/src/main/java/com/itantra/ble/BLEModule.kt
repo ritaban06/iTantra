@@ -6,6 +6,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Base64
+import android.util.Log
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -321,11 +322,22 @@ class BLEModule(reactContext: ReactApplicationContext) :
         if (targetDeviceId != null) {
             // Peer-targeted send: route to specific peer.
             // Do NOT fall back to another peer if this one is unavailable.
-            if (!connManager.isConnectedTo(targetDeviceId)) {
+            val connected = connManager.isConnectedTo(targetDeviceId)
+            val peerState = connManager.peerStates[targetDeviceId]
+            Log.d(
+                "ITANTRA_SEND",
+                "requestedDeviceId=$targetDeviceId isConnectedTo=$connected " +
+                    "peerState=${peerState?.state ?: "MISSING"} role=${peerState?.role ?: "UNKNOWN"}"
+            )
+            if (!connected) {
                 promise.reject("NOT_CONNECTED", "Peer $targetDeviceId is not connected")
                 return
             }
             val error = connManager.send(data, targetDeviceId)
+            Log.d(
+                "ITANTRA_SEND",
+                "requestedDeviceId=$targetDeviceId result=${error ?: "OK"}"
+            )
             if (error != null) {
                 val map = Arguments.createMap().apply {
                     putString("error", error)
@@ -369,6 +381,13 @@ class BLEModule(reactContext: ReactApplicationContext) :
         if (targetDeviceId != null) {
             // Per-peer state query
             val peerState = connManager.peerStates[targetDeviceId]
+            Log.d(
+                "ITANTRA_QUERY",
+                "operation=getConnectionState requestedDeviceId=$targetDeviceId " +
+                    "peerStateExists=${peerState != null} actualStoredDeviceId=${peerState?.deviceId ?: ""} " +
+                    "actualState=${peerState?.state ?: "IDLE"} role=${peerState?.role ?: "UNKNOWN"} " +
+                    "peerStatesKeys=${connManager.peerStates.keys}"
+            )
             val map = Arguments.createMap().apply {
                 if (peerState != null) {
                     putString("state", peerState.state.name)
@@ -398,7 +417,9 @@ class BLEModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getConnectedDeviceIds(promise: Promise) {
         val ids = Arguments.createArray()
-        connManager.getConnectedDeviceIds().forEach { ids.pushString(it) }
+        val connectedIds = connManager.getConnectedDeviceIds()
+        Log.d("ITANTRA_QUERY", "operation=getConnectedDeviceIds result=$connectedIds")
+        connectedIds.forEach { ids.pushString(it) }
         promise.resolve(ids)
     }
 

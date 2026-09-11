@@ -170,6 +170,9 @@ export function useBLE() {
             const hydrationClearVersion = peerMapClearVersionRef.current;
             const ids = await getConnectedDeviceIds();
             const connected = Array.isArray(ids) ? ids : [];
+            console.log(
+              `[ITANTRA_CONN] JS event=HYDRATION nativeConnectedDeviceIds=[${connected.join(',')}]`,
+            );
             const hydrated = await Promise.all(connected.map(async (deviceId: string) => {
               try {
                 const info = await NativeBLE.getConnectionState(deviceId);
@@ -279,6 +282,7 @@ export function useBLE() {
       pendingConnectsRef.current.delete(event.deviceId);
       setConnectionError(null);
       notePeerMutation(event.deviceId);
+      console.log(`[ITANTRA_CONN] JS event=BLE_CONNECTED deviceId=${event.deviceId}`);
       setPeers((prev) => {
         const existing = prev.get(event.deviceId);
         const next = new Map(prev);
@@ -295,6 +299,9 @@ export function useBLE() {
     const disconnectedSub = NativeBLE.onDisconnected((event: BLEDisconnectedEvent) => {
       pendingConnectsRef.current.delete(event.deviceId);
       notePeerMutation(event.deviceId);
+      console.log(
+        `[ITANTRA_CONN] JS event=BLE_DISCONNECTED deviceId=${event.deviceId} reason=${event.reason}`,
+      );
       setPeers((prev) => {
         if (!prev.has(event.deviceId)) return prev;
         const next = new Map(prev);

@@ -5,6 +5,23 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * True only when a native disconnect callback identifies the current peer
+ * connection. The manager uses this predicate before removing native state
+ * and before emitting the JavaScript-visible disconnect event.
+ */
+internal fun shouldEmitDisconnectEvent(
+    current: BLEConnectionManager.PeerConnectionState?,
+    expectedRole: BLEConnectionManager.ConnectionRole?,
+    expectedGeneration: Long?,
+): Boolean {
+    if (current == null) return false
+    if (expectedRole != null && current.role != expectedRole) return false
+    if (expectedGeneration != null && current.connectionGeneration != expectedGeneration) return false
+    return true
+}
 
 /**
  * Coordinates the BLE subsystems: advertiser, scanner, GATT server, and GATT client.
@@ -45,9 +62,10 @@ class BLEConnectionManager(private val context: Context) {
      */
     data class PeerConnectionState(
         val deviceId: String,
-        var state: ConnectionState,
-        var mtu: Int,
-        val role: ConnectionRole
+        @field:Volatile var state: ConnectionState,
+        @field:Volatile var mtu: Int,
+        val role: ConnectionRole,
+        @field:Volatile var connectionGeneration: Long? = null,
     )
 
     interface Listener {
@@ -70,7 +88,13 @@ class BLEConnectionManager(private val context: Context) {
      */
     fun send(data: ByteArray, deviceId: String): String? {
         val peerState = peerStates[deviceId]
-            ?: return "NOT_CONNECTED"
+        Log.d(
+            "ITANTRA_SEND",
+            "requestedDeviceId=$deviceId isConnectedTo=${peerState?.state == ConnectionState.CONNECTED} " +
+                "peerState=${peerState?.state ?: "MISSING"} role=${peerState?.role ?: "UNKNOWN"}"
+        )
+        peerState ?: return "NOT_CONNECTED"
+        if (peerState.state != ConnectionState.CONNECTED) return "NOT_CONNECTED"
 
         return when (peerState.role) {
             ConnectionRole.CLIENT -> {
@@ -116,13 +140,16 @@ class BLEConnectionManager(private val context: Context) {
                 val btDevice = deviceMap[deviceId]
                 if (btDevice != null) {
                     gattServer.cancelConnection(btDevice)
+                    // The server callback owns removal and the single JS
+                    // disconnect event for this role.
+                    return
                 }
             }
         }
-        removePeerState(deviceId)
+        val removed = removePeerState(deviceId, "LOCAL_DISCONNECT", peerState.role)
         syncLegacyState()
 
-        if (peerState.role == ConnectionRole.CLIENT) {
+        if (removed && peerState.role == ConnectionRole.CLIENT) {
             listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
         }
     }
@@ -147,7 +174,12 @@ class BLEConnectionManager(private val context: Context) {
                 gattServer.cancelConnection(btDevice)
             }
         }
-        peerStates.clear()
+        // Client callbacks are suppressed by BLEGattClient.disconnect(), so
+        // remove those entries here. Server entries remain until their
+        // generation-validated server callbacks arrive.
+        clientIds.forEach { deviceId ->
+            removePeerState(deviceId, "DISCONNECT_ALL", ConnectionRole.CLIENT)
+        }
         syncLegacyState()
         // Emit one disconnect event per affected CLIENT-role peer (SERVER-role
         // peers emit via their platform GATT server callbacks).
@@ -160,7 +192,12 @@ class BLEConnectionManager(private val context: Context) {
      * Check if a specific peer is connected.
      */
     fun isConnectedTo(deviceId: String): Boolean {
-        return peerStates[deviceId]?.state == ConnectionState.CONNECTED
+        val result = peerStates[deviceId]?.state == ConnectionState.CONNECTED
+        Log.d(
+            "ITANTRA_QUERY",
+            "operation=isConnectedTo requestedDeviceId=$deviceId result=$result"
+        )
+        return result
     }
 
     /**
@@ -173,9 +210,11 @@ class BLEConnectionManager(private val context: Context) {
      * Get all connected peer device IDs.
      */
     fun getConnectedDeviceIds(): List<String> {
-        return peerStates.values
+        val result = peerStates.values
             .filter { it.state == ConnectionState.CONNECTED }
             .map { it.deviceId }
+        Log.d("ITANTRA_QUERY", "operation=getConnectedDeviceIds result=$result")
+        return result
     }
 
     private val bluetoothManager: BluetoothManager? =
@@ -189,7 +228,7 @@ class BLEConnectionManager(private val context: Context) {
     var listener: Listener? = null
 
     /** Map from iTantra device ID → Android BluetoothDevice (populated during scanning). */
-    private val deviceMap = mutableMapOf<String, BluetoothDevice>()
+    private val deviceMap = ConcurrentHashMap<String, BluetoothDevice>()
 
     // ── Per-peer state (source of truth) ─────────────────────────────
 
@@ -199,7 +238,7 @@ class BLEConnectionManager(private val context: Context) {
      * This is the authoritative source of truth for connection state.
      * Each entry is independent — updating one peer never affects another.
      */
-    val peerStates = mutableMapOf<String, PeerConnectionState>()
+    val peerStates = ConcurrentHashMap<String, PeerConnectionState>()
 
     // ── Legacy single-peer properties (backward compatibility) ───────
     //
@@ -239,20 +278,35 @@ class BLEConnectionManager(private val context: Context) {
 
         // GATT server events.
         gattServer.listener = object : BLEGattServer.Listener {
-            override fun onClientConnected(device: BluetoothDevice) {
-                Log.d(TAG, "GATT server: client connected ${device.address}")
+            override fun onClientConnected(device: BluetoothDevice, generation: Long) {
                 val fromDeviceId = findDeviceIdByAddress(device.address) ?: device.address
-                updatePeerState(fromDeviceId, ConnectionState.CONNECTED, mtu, ConnectionRole.SERVER)
+                Log.d(
+                    "ITANTRA_CONN",
+                    "event=SERVER_CONNECTED_CALLBACK bluetoothAddress=${device.address} " +
+                        "resolvedDeviceId=$fromDeviceId deviceMapKeys=${deviceMap.keys}"
+                )
+                updatePeerState(fromDeviceId, ConnectionState.CONNECTED, mtu, ConnectionRole.SERVER, generation)
                 listener?.onConnectionStateChange(ConnectionState.CONNECTED, fromDeviceId, mtu)
             }
 
-            override fun onClientDisconnected(device: BluetoothDevice) {
-                Log.d(TAG, "GATT server: client disconnected ${device.address}")
+            override fun onClientDisconnected(device: BluetoothDevice, generation: Long) {
                 val fromDeviceId = findDeviceIdByAddress(device.address) ?: device.address
-                removePeerState(fromDeviceId)
+                Log.d(
+                    "ITANTRA_CONN",
+                    "event=SERVER_DISCONNECTED_CALLBACK bluetoothAddress=${device.address} " +
+                        "resolvedDeviceId=$fromDeviceId deviceMapKeys=${deviceMap.keys}"
+                )
+                val removed = removePeerState(
+                    fromDeviceId,
+                    "SERVER_DISCONNECTED",
+                    ConnectionRole.SERVER,
+                    generation,
+                )
                 // Legacy: only clear global state if no other peers remain connected
                 syncLegacyState()
-                listener?.onConnectionStateChange(ConnectionState.IDLE, fromDeviceId, mtu)
+                if (removed) {
+                    listener?.onConnectionStateChange(ConnectionState.IDLE, fromDeviceId, mtu)
+                }
             }
 
             override fun onDataReceived(data: ByteArray, device: BluetoothDevice) {
@@ -270,9 +324,11 @@ class BLEConnectionManager(private val context: Context) {
             }
 
             override fun onDisconnected(deviceId: String, reason: String) {
-                removePeerState(deviceId)
+                val removed = removePeerState(deviceId, "CLIENT_DISCONNECTED:$reason", ConnectionRole.CLIENT)
                 syncLegacyState()
-                listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
+                if (removed) {
+                    listener?.onConnectionStateChange(ConnectionState.IDLE, deviceId, null)
+                }
             }
 
             override fun onDataReceived(deviceId: String, data: ByteArray) {
@@ -284,7 +340,7 @@ class BLEConnectionManager(private val context: Context) {
             override fun onError(deviceId: String?, code: String, message: String) {
                 // Remove failed peer from peerStates if applicable
                 if (deviceId != null) {
-                    removePeerState(deviceId)
+                    removePeerState(deviceId, "CLIENT_ERROR:$code", ConnectionRole.CLIENT)
                 }
                 syncLegacyState()
                 listener?.onConnectionError(code, message)
@@ -304,22 +360,43 @@ class BLEConnectionManager(private val context: Context) {
         deviceId: String,
         state: ConnectionState,
         mtuValue: Int,
-        role: ConnectionRole
+        role: ConnectionRole,
+        connectionGeneration: Long? = null,
     ) {
         val existing = peerStates[deviceId]
         if (existing != null) {
             existing.state = state
             existing.mtu = mtuValue
+            existing.connectionGeneration = connectionGeneration
+            // The same native key may reconnect in the opposite role. Keep
+            // send() routing aligned with the current GATT lifecycle.
+            if (existing.role != role) {
+                peerStates[deviceId] = PeerConnectionState(
+                    deviceId = deviceId,
+                    state = state,
+                    mtu = mtuValue,
+                    role = role,
+                    connectionGeneration = connectionGeneration,
+                )
+            }
         } else {
             peerStates[deviceId] = PeerConnectionState(
                 deviceId = deviceId,
                 state = state,
                 mtu = mtuValue,
-                role = role
+                role = role,
+                connectionGeneration = connectionGeneration,
             )
         }
         // Synchronize legacy properties
         syncLegacyState()
+        if (state == ConnectionState.CONNECTED) {
+            Log.d(
+                "ITANTRA_CONN",
+                "event=CONNECTED deviceId=$deviceId role=$role state=$state " +
+                    "peerStatesKeys=${peerStates.keys} connectedPeerCount=${peerStates.values.count { it.state == ConnectionState.CONNECTED }}"
+            )
+        }
     }
 
     /**
@@ -327,8 +404,55 @@ class BLEConnectionManager(private val context: Context) {
      *
      * Only removes the specific peer — other peers are unaffected.
      */
-    private fun removePeerState(deviceId: String) {
-        peerStates.remove(deviceId)
+    private fun removePeerState(
+        deviceId: String,
+        reason: String,
+        expectedRole: ConnectionRole? = null,
+        expectedGeneration: Long? = null,
+    ): Boolean {
+        val current = peerStates[deviceId]
+        if ((expectedRole != null || expectedGeneration != null) &&
+            !shouldEmitDisconnectEvent(current, expectedRole, expectedGeneration)
+        ) {
+            if (expectedRole != null && current != null && current.role != expectedRole) {
+                Log.w(
+                    "ITANTRA_CONN",
+                    "event=DISCONNECTED_OR_REMOVED deviceId=$deviceId reason=$reason ignoredRoleMismatch=" +
+                        "expected=$expectedRole actual=${current.role} peerStatesKeys=${peerStates.keys}"
+                )
+                return false
+            }
+            if (expectedGeneration != null && current?.connectionGeneration != expectedGeneration) {
+                Log.w(
+                    "ITANTRA_CONN",
+                    "event=DISCONNECTED_OR_REMOVED deviceId=$deviceId reason=$reason ignoredGenerationMismatch=" +
+                        "expected=$expectedGeneration actual=${current?.connectionGeneration} peerStatesKeys=${peerStates.keys}"
+                )
+                return false
+            }
+        }
+        if (expectedRole != null && current == null) {
+            Log.w(
+                "ITANTRA_CONN",
+                "event=DISCONNECTED_OR_REMOVED deviceId=$deviceId reason=$reason ignoredRoleMismatch=" +
+                    "expected=$expectedRole actual=MISSING peerStatesKeys=${peerStates.keys}"
+            )
+            return false
+        }
+        val removed = peerStates.remove(deviceId)
+        Log.d(
+            "ITANTRA_CONN",
+            "event=DISCONNECTED_OR_REMOVED deviceId=$deviceId reason=$reason " +
+                "role=${removed?.role ?: current?.role ?: "UNKNOWN"} peerStatesKeys=${peerStates.keys} " +
+                "connectedPeerCount=${peerStates.values.count { it.state == ConnectionState.CONNECTED }}"
+        )
+        return removed != null
+    }
+
+    private fun clearPeerStates(reason: String) {
+        peerStates.keys.toList().forEach { deviceId ->
+            removePeerState(deviceId, reason)
+        }
     }
 
     /**
@@ -431,7 +555,9 @@ class BLEConnectionManager(private val context: Context) {
             .filter { it.role == ConnectionRole.CLIENT }
             .map { it.deviceId }
         gattClient.disconnect()
-        peerStates.clear()
+        clientIds.forEach { deviceId ->
+            removePeerState(deviceId, "LEGACY_DISCONNECT", ConnectionRole.CLIENT)
+        }
         syncLegacyState()
         // Emit one disconnect event per affected CLIENT-role peer.
         clientIds.forEach { deviceId ->
@@ -454,7 +580,7 @@ class BLEConnectionManager(private val context: Context) {
         scanner.stopScanning()
         advertiser.stopAdvertising()
         gattServer.stop()
-        peerStates.clear()
+        clearPeerStates("STOP")
         syncLegacyState()
     }
 
@@ -483,6 +609,8 @@ class BLEConnectionManager(private val context: Context) {
     // ── Internal helpers ──────────────────────────────────────────────
 
     private fun findDeviceIdByAddress(address: String): String? {
-        return deviceMap.entries.find { it.value.address == address }?.key
+        return deviceMap.entries.find {
+            it.value.address.trim().equals(address.trim(), ignoreCase = true)
+        }?.key
     }
 }

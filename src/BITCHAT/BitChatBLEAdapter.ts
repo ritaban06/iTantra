@@ -223,6 +223,19 @@ export class BitChatBLEAdapter {
     return Array.from(this.peerMappings.keys());
   }
 
+  /**
+   * Return true only when this exact BLE key has a live direct BITCHAT route.
+   * The route is ready only after ANNOUNCE registered a bijective BLE↔NodeId
+   * mapping and the corresponding PeerRegistry entry is CONNECTED.
+   */
+  isDirectPeerReady(blePeerId: string): boolean {
+    const mapping = this.peerMappings.get(blePeerId);
+    if (!mapping) return false;
+    const reverse = this.reverseMappings.get(mapping.bitchatNodeId);
+    if (reverse?.blePeerId !== blePeerId) return false;
+    return this.peerRegistry.getPeer(mapping.bitchatNodeId)?.state === 'CONNECTED';
+  }
+
   // ── ANNOUNCE ─────────────────────────────────────────────────
 
   /**
