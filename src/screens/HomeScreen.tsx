@@ -62,12 +62,16 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
   }, [loadModel, downloadModel, languageCode]);
 
   const isConnected = connectionState === 'CONNECTED';
-  const connectionDot = isConnected ? '🟢' : (connectionState === 'CONNECTING' ? '🟡' : '🔴');
+  const voiceRouteReady = bleVoiceEnabled && bleVoiceStatus !== 'OFF' &&
+    bleVoiceStatus !== 'CONNECTING_MESH_ROUTE' && bleVoiceStatus !== 'ERROR';
+  const connectionDot = voiceRouteReady ? '🟢' : (isConnected ? '🟡' : (connectionState === 'CONNECTING' ? '🟡' : '🔴'));
   const connectionStatusText = isConnected ? `CONNECTED TO ${connectedDeviceId?.toUpperCase()}` : 'DISCONNECTED';
+  const connectionReadinessText = voiceRouteReady ? 'READY' : (isConnected ? 'CONNECTED' : 'NOT READY');
 
   const voiceStatusText = () => {
     switch (bleVoiceStatus) {
       case 'OFF': return 'iTantra Link is off';
+      case 'CONNECTING_MESH_ROUTE': return 'Connecting mesh route...';
       case 'WAITING_FOR_SPEECH': return 'Listening for speech...';
       case 'SENDING': return 'Sending...';
       case 'SENT': return lastSentMessage ? `Sent: "${lastSentMessage.text}"` : 'Sent';
@@ -96,6 +100,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
   const pttDisabled =
     appState === AppState.PROCESSING_STT ||
     appState === AppState.PLAYING_TTS ||
+    (bleVoiceEnabled && bleVoiceStatus === 'CONNECTING_MESH_ROUTE') ||
     remoteBusy;
 
   const { bg: pttBg, text: pttText, icon: pttIcon } = remoteBusy
@@ -127,7 +132,7 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       {/* ── Connection Status Box ─────────────────────────────────── */}
       <View style={styles.connectionBox}>
         <View style={styles.connectionHeader}>
-          <Text style={styles.connectionDot}>{connectionDot} {isConnected ? 'READY' : 'NOT READY'}</Text>
+          <Text style={styles.connectionDot}>{connectionDot} {connectionReadinessText}</Text>
           <TouchableOpacity
             style={[styles.linkToggle, bleVoiceEnabled && styles.linkToggleOn]}
             onPress={toggleVoiceMode}

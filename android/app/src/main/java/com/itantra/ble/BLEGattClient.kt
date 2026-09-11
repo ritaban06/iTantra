@@ -59,7 +59,9 @@ class BLEGattClient(private val context: Context) {
         /** Monotonically increasing ID to detect stale callbacks. */
         val generation: Long,
         /** Serialized write queue for this peer's GATT connection. */
-        val writeQueue: GattWriteQueueFacade = GattWriteQueueFacade()
+        val writeQueue: GattWriteQueueFacade = GattWriteQueueFacade(),
+        /** Correlation for the queue head currently submitted to Android. */
+        @Volatile var activeDiagnosticId: String? = null,
     )
 
     /**
@@ -272,37 +274,38 @@ class BLEGattClient(private val context: Context) {
      * @return null on success, or an error string.
      */
     @SuppressLint("MissingPermission")
-    fun send(data: ByteArray, deviceId: String): String? {
+    fun send(data: ByteArray, deviceId: String, diagnosticId: String? = null): String? {
+        val traceId = diagnosticId ?: "control"
         val peer = synchronized(connections) { connections[deviceId] }
             ?: return "NOT_CONNECTED"
         if (!peer.isConnected) return "NOT_CONNECTED"
 
         val gatt = peer.gatt ?: return "NOT_CONNECTED"
         val char = peer.txCharacteristic ?: return "TX_CHARACTERISTIC_NOT_FOUND"
+        Log.d(
+            "ITANTRA_MVP",
+            "msgId=$traceId STEP=CLIENT_WRITE_START blePeerId=$deviceId bytes=${data.size} " +
+                "connectionGeneration=${peer.generation} characteristicUuid=${char.uuid} " +
+                "propertyFlags=${char.properties}"
+        )
 
         // Enqueue the write — the queue serializes per peer and the returned
         // promise completes on the actual onCharacteristicWrite callback, so
         // fragment N+1 is never submitted before fragment N completed.
-        var submissionError: String? = null
-        val latch = java.util.concurrent.CountDownLatch(1)
+        val completion = GattOperationCompletion()
         peer.writeQueue.enqueueWrite(
             write = {
+                peer.activeDiagnosticId = traceId
                 char.value = data
                 gatt.writeCharacteristic(char)
             },
             onDone = { error ->
-                submissionError = error
-                latch.countDown()
+                completion.complete(error == null, "WRITE_FAILED")
             },
         )
         // GATT completion arrives on a Binder thread; wait for it so the
         // synchronous String? contract with BLEModule is preserved.
-        return try {
-            latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
-            submissionError ?: "WRITE_TIMEOUT"
-        } catch (_: InterruptedException) {
-            "WRITE_TIMEOUT"
-        }
+        return completion.await(10, "WRITE_TIMEOUT")
     }
 
     /**
@@ -469,17 +472,46 @@ class BLEGattClient(private val context: Context) {
                 }
 
                 // Enable notifications on RX.
-                gatt.setCharacteristicNotification(rxChar, true)
+                if (!gatt.setCharacteristicNotification(rxChar, true)) {
+                    Log.w(
+                        "ITANTRA_MVP",
+                        "STEP=CLIENT_SUBSCRIBE blePeerId=$deviceId characteristicUuid=${rxChar.uuid} " +
+                            "cccdUuid=${BLEConstants.CCCD_UUID} localNotificationEnable=false generation=$generation"
+                    )
+                    listener?.onError(deviceId, "NOTIFICATION_ENABLE_FAILED", "Could not enable local notifications for $deviceId")
+                    gatt.disconnect()
+                    return
+                }
+                Log.d(
+                    "ITANTRA_MVP",
+                    "CLIENT_SCHEMA target=$deviceId service=${BLEConstants.SERVICE_UUID} " +
+                        "txUuid=${peer.txCharacteristic?.uuid ?: "NONE"} rxUuid=${rxChar.uuid} " +
+                        "cccdUuid=${BLEConstants.CCCD_UUID} rxProperties=${rxChar.properties} " +
+                        "generation=$generation"
+                )
                 val descriptor = rxChar.getDescriptor(BLEConstants.CCCD_UUID)
                 if (descriptor != null) {
                     descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    gatt.writeDescriptor(descriptor)
+                    val accepted = gatt.writeDescriptor(descriptor)
+                    Log.d(
+                        "ITANTRA_MVP",
+                        "STEP=CLIENT_SUBSCRIBE blePeerId=$deviceId characteristicUuid=${rxChar.uuid} " +
+                            "cccdUuid=${descriptor.uuid} cccdFound=true writeAccepted=$accepted " +
+                            "generation=$generation"
+                    )
+                    if (!accepted) {
+                        listener?.onError(deviceId, "NOTIFICATION_ENABLE_FAILED", "Could not write RX CCCD for $deviceId")
+                        gatt.disconnect()
+                    }
                 } else {
                     // CCCD not found — still connected, but notifications won't work.
-                    Log.w(TAG, "CCCD descriptor not found on RX characteristic for $deviceId")
-                    peer.isConnected = true
-                    syncLegacyState()
-                    listener?.onConnected(deviceId, peer.mtu)
+                    Log.w(
+                        "ITANTRA_MVP",
+                        "STEP=CLIENT_SUBSCRIBE blePeerId=$deviceId characteristicUuid=${rxChar.uuid} " +
+                            "cccdUuid=${BLEConstants.CCCD_UUID} cccdFound=false generation=$generation"
+                    )
+                    listener?.onError(deviceId, "CCCD_NOT_FOUND", "RX CCCD not found for $deviceId")
+                    gatt.disconnect()
                 }
             }
 
@@ -489,10 +521,16 @@ class BLEGattClient(private val context: Context) {
                 status: Int
             ) {
                 val peer = validateCallback(deviceId, generation) ?: return
+                val traceId = peer.activeDiagnosticId ?: "control"
 
                 // Drive the per-peer write queue: the next queued write (if any)
                 // is only submitted after this completion.
                 peer.writeQueue.notifyCompleted(status == BluetoothGatt.GATT_SUCCESS)
+                Log.d(
+                    "ITANTRA_MVP",
+                    "msgId=$traceId STEP=CLIENT_WRITE_CALLBACK blePeerId=$deviceId status=$status " +
+                        "characteristicUuid=${characteristic.uuid} generation=$generation"
+                )
 
                 if (status != BluetoothGatt.GATT_SUCCESS) {
                     listener?.onError(deviceId, "WRITE_FAILED", "Characteristic write failed for $deviceId: $status")
@@ -508,6 +546,12 @@ class BLEGattClient(private val context: Context) {
                 if (characteristic.uuid == BLEConstants.RX_CHAR_UUID) {
                     val data = characteristic.value
                     if (data != null && data.isNotEmpty()) {
+                        Log.d(
+                            "ITANTRA_MVP",
+                            "STEP=BLE_RECEIVE fromPeer=$deviceId bytes=${data.size} " +
+                                "path=CLIENT_NOTIFICATION characteristicUuid=${characteristic.uuid} " +
+                                "generation=$generation payloadHexPrefix=${hexPrefix(data)}"
+                        )
                         listener?.onDataReceived(deviceId, data)
                     }
                 }
@@ -521,6 +565,14 @@ class BLEGattClient(private val context: Context) {
                 val peer = validateCallback(deviceId, generation) ?: return
 
                 if (descriptor.characteristic?.uuid == BLEConstants.RX_CHAR_UUID) {
+                    Log.d(
+                        "ITANTRA_MVP",
+                        "STEP=CLIENT_SUBSCRIBE_CALLBACK blePeerId=$deviceId " +
+                            "characteristicUuid=${descriptor.characteristic?.uuid ?: "NONE"} " +
+                            "cccdUuid=${descriptor.uuid} status=$status " +
+                            "notificationSetupCompleted=${status == BluetoothGatt.GATT_SUCCESS} " +
+                            "generation=$generation"
+                    )
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         // Notifications enabled — connection is fully established.
                         peer.isConnected = true
@@ -534,5 +586,13 @@ class BLEGattClient(private val context: Context) {
                 }
             }
         }
+    }
+
+    /** Bounded raw-byte evidence; `ITEST` (five bytes) is logged in full. */
+    private fun hexPrefix(data: ByteArray, maxBytes: Int = 16): String {
+        val shown = data.take(maxBytes).joinToString("") { byte ->
+            "%02X".format(byte.toInt() and 0xff)
+        }
+        return if (data.size > maxBytes) "$shown..." else shown
     }
 }

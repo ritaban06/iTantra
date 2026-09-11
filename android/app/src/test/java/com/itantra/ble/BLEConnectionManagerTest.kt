@@ -15,6 +15,57 @@ import org.junit.Test
  */
 class BLEConnectionManagerTest {
 
+    @Test
+    fun `stale server generation cannot emit a disconnect for current generation`() {
+        val current = BLEConnectionManager.PeerConnectionState(
+            deviceId = "PEER",
+            state = BLEConnectionManager.ConnectionState.CONNECTED,
+            mtu = 23,
+            role = BLEConnectionManager.ConnectionRole.SERVER,
+            connectionGeneration = 2L,
+        )
+
+        assertFalse(
+            shouldEmitDisconnectEvent(
+                current,
+                BLEConnectionManager.ConnectionRole.SERVER,
+                expectedGeneration = 1L,
+            )
+        )
+        assertTrue(
+            shouldEmitDisconnectEvent(
+                current,
+                BLEConnectionManager.ConnectionRole.SERVER,
+                expectedGeneration = 2L,
+            )
+        )
+    }
+
+    @Test
+    fun `role mismatched disconnect cannot emit a false event`() {
+        val current = BLEConnectionManager.PeerConnectionState(
+            deviceId = "PEER",
+            state = BLEConnectionManager.ConnectionState.CONNECTED,
+            mtu = 23,
+            role = BLEConnectionManager.ConnectionRole.CLIENT,
+        )
+
+        assertFalse(
+            shouldEmitDisconnectEvent(
+                current,
+                BLEConnectionManager.ConnectionRole.SERVER,
+                expectedGeneration = 7L,
+            )
+        )
+        assertTrue(
+            shouldEmitDisconnectEvent(
+                current,
+                BLEConnectionManager.ConnectionRole.CLIENT,
+                expectedGeneration = null,
+            )
+        )
+    }
+
     // ── Helper: create a peer state map for testing ───────────────────
 
     private fun createPeerStates(): MutableMap<String, BLEConnectionManager.PeerConnectionState> {

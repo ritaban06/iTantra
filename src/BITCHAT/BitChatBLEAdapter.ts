@@ -52,10 +52,14 @@ import { PeerRegistry } from './peer/PeerRegistry';
 // ── Types ────────────────────────────────────────────────────────
 
 /** Callback to send raw bytes over BLE to a specific peer. */
-export type BleSendFn = (peerBleId: string, payload: Uint8Array) => Promise<void>;
+export type BleSendFn = (peerBleId: string, payload: Uint8Array, diagnosticId?: string) => Promise<void>;
 
 /** Callback for locally-delivered payloads (V6B frames for application decode). */
-export type LocalDeliverFn = (v6bPayload: Uint8Array, fromPeerId?: string) => void;
+export type LocalDeliverFn = (
+  v6bPayload: Uint8Array,
+  fromPeerId?: string,
+  diagnosticId?: string,
+) => void;
 
 export interface BitChatBLEAdapterParams {
   /** This node's BITCHAT identity. */
@@ -129,7 +133,11 @@ export class BitChatBLEAdapter {
         throw new Error(`No BLE mapping for peer ${peerId}`);
       }
       const encoded = bitChatEncode(packet);
-      await this.bleSend(mapping.blePeerId, encoded);
+      console.log(
+        `[ITANTRA_MVP] msgId=${packet.packetId} STEP=BITCHAT_FORWARD ` +
+          `blePeerId=${mapping.blePeerId} frameBytes=${encoded.length}`,
+      );
+      await this.bleSend(mapping.blePeerId, encoded, packet.packetId);
     };
 
     // deliver: called by RelayEngine for first-seen packets addressed to this node
@@ -148,7 +156,11 @@ export class BitChatBLEAdapter {
       const blePeerId = fromPeerId
         ? this.reverseMappings.get(fromPeerId)?.blePeerId
         : undefined;
-      this.onLocalDeliver(packet.payload, blePeerId);
+      console.log(
+        `[ITANTRA_MVP] msgId=${packet.packetId} STEP=LOCAL_DELIVERY ` +
+          `source=${packet.sourceNodeId} destination=${packet.destinationNodeId}`,
+      );
+      this.onLocalDeliver(packet.payload, blePeerId, packet.packetId);
     };
 
     this.relayEngine = new RelayEngine({
@@ -221,6 +233,19 @@ export class BitChatBLEAdapter {
   /** Return the native BLE keys currently represented in the direct map. */
   getDirectBlePeerIds(): string[] {
     return Array.from(this.peerMappings.keys());
+  }
+
+  /**
+   * Return true only when this exact BLE key has a live direct BITCHAT route.
+   * The route is ready only after ANNOUNCE registered a bijective BLE↔NodeId
+   * mapping and the corresponding PeerRegistry entry is CONNECTED.
+   */
+  isDirectPeerReady(blePeerId: string): boolean {
+    const mapping = this.peerMappings.get(blePeerId);
+    if (!mapping) return false;
+    const reverse = this.reverseMappings.get(mapping.bitchatNodeId);
+    if (reverse?.blePeerId !== blePeerId) return false;
+    return this.peerRegistry.getPeer(mapping.bitchatNodeId)?.state === 'CONNECTED';
   }
 
   // ── ANNOUNCE ─────────────────────────────────────────────────
@@ -365,6 +390,11 @@ export class BitChatBLEAdapter {
     if (!packet) {
       return null;
     }
+    console.log(
+      `[ITANTRA_MVP] msgId=${packet.packetId} STEP=BITCHAT_RECEIVE localNode=${this.localNodeId} ` +
+        `source=${packet.sourceNodeId} destination=${packet.destinationNodeId} ` +
+        `type=${packet.packetType} packetId=${packet.packetId} ttl=${packet.ttl}`,
+    );
 
     // V9C: ANNOUNCE is direct-link-only. Process locally, never relay.
     if (packet.packetType === PACKET_TYPE_ANNOUNCE) {
@@ -403,6 +433,7 @@ export class BitChatBLEAdapter {
     packetId: PacketId,
     destinationNodeId: NodeId = NODE_ID_BROADCAST,
     ttl: number = DEFAULT_TTL,
+    fragmentCount: number = 1,
   ): Promise<number> {
     this.originatedPacketId = packetId;
 
@@ -416,6 +447,14 @@ export class BitChatBLEAdapter {
       flags: FLAGS_NONE,
       payload,
     };
+    const forwardPeerBleIds = this.meshRouter.getRelayPeers()
+      .map((nodeId) => this.reverseMappings.get(nodeId)?.blePeerId)
+      .filter((blePeerId): blePeerId is string => !!blePeerId);
+    console.log(
+      `[ITANTRA_MVP] msgId=${packet.packetId} STEP=BITCHAT_ORIGINATE source=${packet.sourceNodeId} ` +
+        `destination=${packet.destinationNodeId} packetId=${packet.packetId} ttl=${packet.ttl} ` +
+        `fragmentCount=${fragmentCount} payloadBytes=${payload.length} forwardPeerBleIds=[${forwardPeerBleIds.join(',')}]`,
+    );
 
     return await this.relayEngine.originate(packet);
   }

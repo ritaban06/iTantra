@@ -52,12 +52,18 @@ import {
   HEADER_SIZE as BITCHAT_HEADER_SIZE,
   PROTOCOL_VERSION as BITCHAT_PROTOCOL_VERSION,
 } from '../BITCHAT';
+import {
+  beginVoiceMvpTrace,
+  clearVoiceMvpTrace,
+  takeVoiceMvpTrace,
+} from '../diagnostics/VoiceMvpTrace';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
 const { NativeTTS } = NativeModules;
 
 export type BLEVoiceModeStatus =
   | 'OFF'
+  | 'CONNECTING_MESH_ROUTE'
   | 'WAITING_FOR_SPEECH'
   | 'SENDING'
   | 'SENT'
@@ -217,6 +223,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   // BITCHAT mapping has not formed yet (e.g. server role whose peer's
   // ANNOUNCE was lost before our CCCD was ready).
   const connectedPeersRef = useRef<Set<string>>(new Set());
+  // Readiness cache only; the adapter remains authoritative for the
+  // NodeId↔BLE mapping and PeerRegistry state.
+  const routeReadyPeersRef = useRef<Set<string>>(new Set());
+  const markRouteReadyRef = useRef<(peerId: string) => void>(() => {});
+  const getConnectedVoicePeerRef = useRef<() => Promise<string | null>>(async () => null);
 
   // ── Half-duplex transmission ownership (direct-link control plane) ──
   //
@@ -295,6 +306,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
   /** Helper: send a V6B frame to a SPECIFIC BLE peer (peer-targeted). */
   const sendV6BFrameToPeer = useCallback(async (frame: Uint8Array, deviceId: string): Promise<void> => {
+    console.log(
+      `[ITANTRA_MVP] V6B_ENCODE target=${deviceId} frameBytes=${frame.length}`,
+    );
     await NativeBLE.send(bytesToBase64(frame), deviceId);
   }, []);
 
@@ -426,7 +440,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
    * All V8 state access is scoped to `fromPeerId` so one peer's
    * ACK/NACK/data can never affect another peer's reliability state.
    */
-  const processV6BPayload = useCallback((v6bPayload: Uint8Array, fromPeerId: string) => {
+  const processV6BPayload = useCallback((
+    v6bPayload: Uint8Array,
+    fromPeerId: string,
+    diagnosticId?: string,
+  ) => {
     let semanticMsg = null;
 
     if (v6bPayload.length > 0 && v6bPayload[0] === V6B_VERSION) {
@@ -466,6 +484,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             } else {
               const v6aChunk = frame.payload.slice(V7_HEADER_SIZE);
               const result = reassemblerRef.current.addFragment(fromPeerId, header, v6aChunk);
+              console.log(
+                `[ITANTRA_MVP] msgId=${diagnosticId ?? 'unknown'} STEP=V7_REASSEMBLY ` +
+                  `source=${fromPeerId} groupId=${header.groupId} fragmentIndex=${header.fragmentIndex} ` +
+                  `fragmentCount=${header.totalFragments} status=${result.status}`,
+              );
               if (result.status === 'complete') {
                 semanticMsg = decodeWithFallback(result.v6aPacket);
                 if (semanticMsg) {
@@ -514,6 +537,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         const header = parseHeader(v6bPayload);
         const v6aChunk = v6bPayload.slice(V7_HEADER_SIZE);
         const result = reassemblerRef.current.addFragment(fromPeerId, header, v6aChunk);
+        console.log(
+          `[ITANTRA_MVP] msgId=${diagnosticId ?? 'unknown'} STEP=V7_REASSEMBLY ` +
+            `source=${fromPeerId} groupId=${header.groupId} fragmentIndex=${header.fragmentIndex} ` +
+            `fragmentCount=${header.totalFragments} status=${result.status}`,
+        );
         if (result.status === 'complete') {
           semanticMsg = decodeWithFallback(result.v6aPacket);
           if (semanticMsg) {
@@ -549,6 +577,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       emotionConfidencePct = Math.round(semanticMsg.emotionConfidence * 100);
       voiceProfileDisplay = semanticMsg.voiceProfile;
       console.log(`[BLE Voice] Received message ${semanticMsg.messageId} from ${fromPeerId}: "${text}"`);
+      console.log(
+        `[ITANTRA_MVP] msgId=${diagnosticId ?? semanticMsg.messageId} STEP=SEMANTIC_DECODE ` +
+          `semanticMessageId=${semanticMsg.messageId} textLength=${text.length} language=${semanticMsg.language}`,
+      );
     } else {
       console.warn(`[BLE Voice] Unparseable data from ${fromPeerId}`);
       return;
@@ -564,13 +596,22 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     if (!isMutedRef.current) { NativeSTT.muteMic(); isMutedRef.current = true; }
     setStatus('SPEAKING');
     const ttsLanguage = semanticMsg?.language ?? 'en';
+    console.log(
+        `[ITANTRA_MVP] msgId=${diagnosticId ?? semanticMsg?.messageId ?? 'unknown'} STEP=TTS_START ` +
+        `text=${JSON.stringify(text)} language=${ttsLanguage}`,
+    );
     NativeTTS.speak(text, ttsLanguage, false)
       .then(() => {
+        console.log(`[ITANTRA_MVP] msgId=${diagnosticId ?? semanticMsg?.messageId ?? 'unknown'} STEP=TTS_RESULT result=SUCCESS`);
         if (isMutedRef.current) { NativeSTT.unmuteMic(); isMutedRef.current = false; }
         setStatus(enabled ? 'WAITING_FOR_SPEECH' : 'OFF');
         setReceivedMessages((prev) => prev.map((m) => m.time === message.time ? { ...m, status: 'spoken' as const } : m));
       })
       .catch((err: any) => {
+        console.warn(
+          `[ITANTRA_MVP] msgId=${diagnosticId ?? semanticMsg?.messageId ?? 'unknown'} STEP=TTS_ERROR ` +
+            `error=${String(err?.message || err)}`,
+        );
         if (isMutedRef.current) { NativeSTT.unmuteMic(); isMutedRef.current = false; }
         setVoiceError(`TTS error: ${err.message || err}`);
         setStatus('ERROR');
@@ -597,20 +638,32 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     // Create adapter
     const adapter = new BitChatBLEAdapter({
       localNodeId,
-      bleSend: async (peerBleId: string, payload: Uint8Array) => {
+      bleSend: async (peerBleId: string, payload: Uint8Array, diagnosticId?: string) => {
         // V9C: Wrap BITCHAT envelope in V6B for per-hop transport framing.
         // V9E Step 6: each BLE peer has its own SequenceManager, and the
         // frame is sent with peer targeting (never the legacy no-peer path).
         const { seqManager } = getOrCreatePeerReliability(peerBleId);
         const seq = seqManager.nextSequence();
         const v6bFrame = v6bEncode(seq, V6B_FRAME_BITCHAT, payload);
-        await NativeBLE.send(bytesToBase64(v6bFrame), peerBleId);
+        const routeReady =
+          connectedPeersRef.current.has(peerBleId) &&
+          bitchatAdapterRef.current?.isDirectPeerReady(peerBleId) === true;
+        console.log(
+          `[ITANTRA_MVP] msgId=${diagnosticId ?? 'control'} STEP=TX_TARGET ` +
+            `blePeerId=${peerBleId} routeReady=${routeReady}`,
+        );
+        console.log(
+          `[ITANTRA_MVP] msgId=${diagnosticId ?? 'control'} STEP=V6B_ENCODE ` +
+            `target=${peerBleId} frameBytes=${v6bFrame.length} frameType=${V6B_FRAME_BITCHAT}`,
+        );
+        await NativeBLE.send(bytesToBase64(v6bFrame), peerBleId, diagnosticId);
       },
-      onLocalDeliver: (v6bPayload: Uint8Array, fromPeerId?: string) => {
+      onLocalDeliver: (v6bPayload: Uint8Array, fromPeerId?: string, diagnosticId?: string) => {
         // Pass the V6B payload to the existing decode pipeline
-        processV6BPayload(v6bPayload, fromPeerId ?? 'unknown');
+        processV6BPayload(v6bPayload, fromPeerId ?? 'unknown', diagnosticId);
       },
       onAnnounceReceived: (blePeerId: string) => {
+        markRouteReadyRef.current(blePeerId);
         // V9E-announce-heal: a valid incoming ANNOUNCE proves the direct link
         // is fully established (the peer could receive our frames), so answer
         // with our own ANNOUNCE if the peer has not registered us yet. This
@@ -634,8 +687,26 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
   const resetAnnounceState = useCallback((peerId: string): void => {
     announcedPeersRef.current.delete(peerId);
+    routeReadyPeersRef.current.delete(peerId);
     clearAnnounceRetry(peerId);
   }, [clearAnnounceRetry]);
+
+  /** Check the exact native key plus the adapter's current direct route. */
+  const isDirectRouteReady = useCallback((peerId: string): boolean => {
+    if (!connectedPeersRef.current.has(peerId)) return false;
+    return bitchatAdapterRef.current?.isDirectPeerReady(peerId) === true;
+  }, []);
+
+  const markDirectRouteReady = useCallback((peerId: string): void => {
+    if (!isDirectRouteReady(peerId)) return;
+    const wasReady = routeReadyPeersRef.current.has(peerId);
+    routeReadyPeersRef.current.add(peerId);
+    if (!wasReady && enabledRef.current && statusRef.current === 'CONNECTING_MESH_ROUTE') {
+      setVoiceError(null);
+      setStatus('WAITING_FOR_SPEECH');
+    }
+  }, [isDirectRouteReady]);
+  markRouteReadyRef.current = markDirectRouteReady;
 
   // ── Half-duplex TX ownership control plane ─────────────────────
 
@@ -669,12 +740,22 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       if (typeof (NativeBLE as any).getConnectedDeviceIds === 'function') {
         try {
           const info = await NativeBLE.getConnectionState(peerId);
+          console.log(
+            `[ITANTRA_TX] stage=getConnectionState target=${peerId} ` +
+              `connectedPeersRef=[${[...connectedPeersRef.current].join(',')}] ` +
+              `state=${info?.state ?? 'MISSING'} deviceId=${info?.deviceId ?? ''} ` +
+              `txOwner=${txOwnerRef.current}`,
+          );
           if (!(info?.state === 'CONNECTED' && info.deviceId === peerId)) {
             connectedPeersRef.current.delete(peerId);
             txRequestOutcomeRef.current.set(peerId, 'UNREACHABLE');
             return null;
           }
         } catch {
+          console.warn(
+            `[ITANTRA_TX] stage=getConnectionState target=${peerId} ` +
+              `connectedPeersRef=[${[...connectedPeersRef.current].join(',')}] result=ERROR`,
+          );
           txRequestOutcomeRef.current.set(peerId, 'UNREACHABLE');
           return null;
         }
@@ -696,9 +777,14 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       txRequestResolversRef.current.set(peerId, resolveFn);
       try {
         await sendTxControl(peerId, TX_OP_REQUEST, 0, requestId);
-      } catch {
+      } catch (error) {
         txRequestResolversRef.current.delete(peerId);
         txRequestOutcomeRef.current.set(peerId, 'UNREACHABLE');
+        console.warn(
+          `[ITANTRA_TX] stage=sendTxControl target=${peerId} ` +
+            `connectedPeersRef=[${[...connectedPeersRef.current].join(',')}] ` +
+            `result=ERROR error=${String(error)}`,
+        );
         return null;
       }
       // Bounded wait: an unanswered/lost REQUEST must not block PTT forever.
@@ -929,6 +1015,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       liveIds.forEach((peerId) => {
         connectedPeersRef.current.add(peerId);
       });
+      console.log(
+        `[ITANTRA_TX] stage=reconcile nativeConnectedDeviceIds=[${liveIds.join(',')}] ` +
+          `connectedPeersRef=[${[...connectedPeersRef.current].join(',')}]`,
+      );
       // Adapter creation may wait on persisted identity storage. Native
       // connection reconciliation must not block PTT on that unrelated
       // initialization; announce as soon as the adapter is ready.
@@ -942,7 +1032,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
                 adapter.unregisterPeer(peerId);
               });
           }
-          liveIds.forEach((peerId) => scheduleAnnounceToPeer(peerId));
+          liveIds.forEach((peerId) => {
+            if (!isDirectRouteReady(peerId)) scheduleAnnounceToPeer(peerId);
+            else markDirectRouteReady(peerId);
+          });
           if (liveIds.length > 0) {
             console.log(`[BLE Voice][CONNECTION] reconciled peers=${liveIds.join(',')} adapter=${adapter.getLocalNodeId()}`);
           }
@@ -953,7 +1046,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     } catch (err) {
       console.warn(`[BLE Voice][CONNECTION] peer reconciliation failed: ${String(err)}`);
     }
-  }, [getOrCreateAdapter, resetAnnounceState, scheduleAnnounceToPeer]);
+  }, [getOrCreateAdapter, isDirectRouteReady, markDirectRouteReady, resetAnnounceState, scheduleAnnounceToPeer]);
 
   // Keep the hook's React state in sync with the shared destination store.
   useEffect(() => {
@@ -1015,6 +1108,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
       const transcript = event.transcript?.trim();
       if (!transcript) {
+        clearVoiceMvpTrace();
         // Empty result = turn produced no speech. Release the half-duplex
         // lock so the peer is never stuck WAITING on an aborted turn.
         if (txOwnerRef.current === TX_OWNER_SELF) {
@@ -1022,6 +1116,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         }
         return;
       }
+      const trace = takeVoiceMvpTrace();
+      console.log(
+        `[ITANTRA_MVP] msgId=${trace?.packetId ?? 'unassigned'} STEP=STT_FINAL ` +
+          `textLength=${transcript.length}`,
+      );
 
       // ── Half-duplex gate: STT produced text, but we may not own the link. ──
       // Ownership is normally acquired at PTT press (beginPttTurn) so the
@@ -1040,9 +1139,19 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       const semanticMsg = createSemanticMessage(transcript, {
         language: languageCodeRef.current,
       });
+      // Keep the diagnostic's PTT/STT correlation ID identical to the V6A
+      // compact ID and BITCHAT packet ID without placing any extra bytes on
+      // the BLE wire.
+      if (trace) {
+        semanticMsg.messageId = trace.semanticMessageId;
+      }
 
       const v6aEncoded = encodeUnrestricted(semanticMsg);
       const byteLen = binaryGetEncodedByteLength(semanticMsg);
+      console.log(
+        `[ITANTRA_MVP] msgId=${trace?.packetId ?? 'unassigned'} STEP=SEMANTIC_ENCODE ` +
+          `bytes=${v6aEncoded.length} semanticMessageId=${semanticMsg.messageId}`,
+      );
 
       // V7 fragmentation: split if V6A exceeds V6B payload limit
       const fragments = splitV6A(v6aEncoded);
@@ -1061,6 +1170,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       // travels on the wire (the receiver decodes it back as a hex
       // string). It doubles as a stable BITCHAT packetId for the mesh path.
       const compactHash = hashMessageId(semanticMsg.messageId);
+      console.log(
+        `[ITANTRA_MVP] msgId=${normalizePacketId(compactHash)} STEP=V6A_ENCODE ` +
+          `semanticMessageId=${semanticMsg.messageId} v6aBytes=${v6aEncoded.length}`,
+      );
 
       const markSent = (): void => {
         setSendStatus('sent');
@@ -1127,6 +1240,8 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
               v6aEncoded,
               normalizePacketId(compactHash),
               destinationNodeId,
+              undefined,
+              1,
             );
           }
 
@@ -1145,6 +1260,8 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
               frag.payload,
               fragPacketId,
               destinationNodeId,
+              undefined,
+              meshFragments.length,
             );
             if (forwarded === 0) {
               return 0;
@@ -1236,6 +1353,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       }
 
       if (!decoded.trim()) return;
+      console.log(
+        `[ITANTRA_MVP] BLE_RECEIVE from=${event.fromDevice} bytes=${decoded.length}`,
+      );
 
       // Convert to Uint8Array for binary detection.
       let rawData: Uint8Array | string;
@@ -1266,6 +1386,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             console.warn(`[BLE Voice] Malformed V6B frame dropped: ${e.message}`);
             return;
           }
+          console.log(
+            `[ITANTRA_MVP] STEP=V6B_DECODE type=${frame.frameType} sequence=${frame.sequence} ` +
+              `source=${event.fromDevice} bytes=${rawData.length}`,
+          );
 
           // V8: intercept ACK/NACK before DATA processing — route to the
           // per-peer manager of the device that sent the frame.
@@ -1432,6 +1556,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         console.log(
           `[BLE Voice] Received message ${semanticMsg.messageId} from ${event.fromDevice}: "${text}"`,
         );
+        console.log(
+          `[ITANTRA_MVP] msgId=${semanticMsg.messageId} STEP=SEMANTIC_DECODE ` +
+            `textLength=${text.length} language=${semanticMsg.language}`,
+        );
       } else {
         // Fallback: treat as plain text (V3 legacy or malformed).
         // Hardening (Step 11, Audit 9): binary garbage — truncated frames
@@ -1477,8 +1605,13 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
       // Speak via existing TTS using the text and language from the semantic message.
       const ttsLanguage = semanticMsg?.language ?? 'en';
+      console.log(
+        `[ITANTRA_MVP] msgId=${semanticMsg?.messageId ?? 'unknown'} STEP=TTS_START ` +
+          `text=${JSON.stringify(text)} language=${ttsLanguage}`,
+      );
       NativeTTS.speak(text, ttsLanguage, false)
         .then(() => {
+          console.log('[ITANTRA_MVP] STEP=TTS_RESULT result=SUCCESS');
           // Unmute mic after TTS finishes.
           if (isMutedRef.current) {
             NativeSTT.unmuteMic();
@@ -1493,6 +1626,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
           );
         })
         .catch((err: any) => {
+          console.warn(`[ITANTRA_MVP] STEP=TTS_ERROR error=${String(err?.message || err)}`);
           if (isMutedRef.current) {
             NativeSTT.unmuteMic();
             isMutedRef.current = false;
@@ -1569,6 +1703,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     const connectedSub = NativeBLE.onConnected((event: { deviceId: string }) => {
       const peerId = event?.deviceId;
       if (peerId) {
+        // Every native CONNECTED event starts a fresh connection-scoped
+        // BITCHAT route. Do not reuse a mapping from an earlier reconnect.
+        bitchatAdapterRef.current?.unregisterPeer(peerId);
+        resetAnnounceState(peerId);
         connectedPeersRef.current.add(peerId);
         scheduleAnnounceToPeer(peerId);
       }
@@ -1645,9 +1783,26 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     // Pick the turn target: primary connected peer, else the native
     // connection view (legacy direct path without BITCHAT).
     const primaryPeer = [...connectedPeersRef.current][0];
-    const target = primaryPeer ?? ((await NativeBLE.getConnectionState().catch(() => null))?.deviceId || null);
+    const target = primaryPeer ?? (await getConnectedVoicePeerRef.current());
+    console.log(
+      `[ITANTRA_TX] stage=beginPtt target=${target ?? ''} ` +
+        `connectedPeersRef=[${[...connectedPeersRef.current].join(',')}] ` +
+        `txOwner=${txOwnerRef.current}`,
+    );
+    console.log(
+      `[ITANTRA_MVP] TX_REQUEST target=${target ?? ''} txOwner=${txOwnerRef.current} ` +
+        `routeReady=${target ? isDirectRouteReady(target) : false}`,
+    );
     if (!target) {
       setVoiceError('Connect to a device first');
+      return false;
+    }
+    // With the current peer-aware native module, BLE CONNECTED is not enough
+    // to start a voice turn. The exact key must already have an ANNOUNCE-
+    // derived direct BITCHAT route.
+    if (typeof (NativeBLE as any).getConnectedDeviceIds === 'function' && !isDirectRouteReady(target)) {
+      setVoiceError(null);
+      setStatus('CONNECTING_MESH_ROUTE');
       return false;
     }
     const grantedTxId = await requestTxOwnership(target);
@@ -1668,8 +1823,13 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       return false;
     }
     txOwningPeerRef.current = target;
+    const trace = beginVoiceMvpTrace();
+    console.log(
+      `[ITANTRA_MVP] msgId=${trace.packetId} STEP=PTT_ARMED ` +
+        `target=${target} semanticMessageId=${trace.semanticMessageId}`,
+    );
     return true;
-  }, [reconcileConnectedPeers, requestTxOwnership]);
+  }, [isDirectRouteReady, reconcileConnectedPeers, requestTxOwnership]);
 
   /**
    * End the local PTT turn: release ownership so the peer can talk.
@@ -1722,6 +1882,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       return null;
     }
   }, []);
+  getConnectedVoicePeerRef.current = getConnectedVoicePeer;
 
   const toggleVoiceMode = useCallback(async () => {
     if (enabled) {
@@ -1748,8 +1909,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         // Reuse the exact native key verified above for the first PTT turn;
         // reconciliation will refresh this set from the same native source.
         connectedPeersRef.current.add(connectedPeerId);
+        const routeReady = isDirectRouteReady(connectedPeerId);
         setEnabled(true);
-        setStatus('WAITING_FOR_SPEECH');
+        setStatus(routeReady ? 'WAITING_FOR_SPEECH' : 'CONNECTING_MESH_ROUTE');
         setVoiceError(null);
         setLastSentMessage(null);
         setSendStatus('idle');
@@ -1757,7 +1919,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         setVoiceError(e.message);
       }
     }
-  }, [enabled, getConnectedVoicePeer]);
+  }, [enabled, getConnectedVoicePeer, isDirectRouteReady]);
 
   const clearError = useCallback(() => {
     setVoiceError(null);

@@ -24,12 +24,17 @@ import {
   V6B_FRAME_BITCHAT,
   V6B_FRAME_NACK,
   V6B_FRAME_V6A_MESSAGE,
+  V6B_FRAME_TX_CONTROL,
+  TX_OP_GRANT,
+  TX_OP_REQUEST,
   V6B_VERSION,
   V7_MARKER,
   parseHeader,
   ReliabilityManager,
   encodeUnrestricted,
   decodeWithFallback,
+  buildTxControlFrame,
+  decodeTxControlPayload,
 } from '../../protocol';
 import { createSemanticMessage } from '../../semantic';
 import {
@@ -301,6 +306,15 @@ function buildDataFrameBase64(payload: Uint8Array, sequence: number = 0): string
   return bytesToBase64(frame);
 }
 
+function buildRemoteAnnounceFrame(nodeId: string): string {
+  const remote = new BitChatBLEAdapter({
+    localNodeId: nodeId,
+    bleSend: async () => {},
+    onLocalDeliver: () => {},
+  });
+  return bytesToBase64(v6bEncode(0, V6B_FRAME_BITCHAT, remote.createAnnouncePacket()));
+}
+
 function semanticPayload(text: string): { v6a: Uint8Array; messageId: string } {
   const semanticMsg = createSemanticMessage(text, { language: 'en' });
   return { v6a: encodeUnrestricted(semanticMsg), messageId: semanticMsg.messageId };
@@ -380,6 +394,7 @@ afterEach(() => {
 
 describe('useBLEVoiceMode — authoritative Link enablement target', () => {
   it('enables Link from a Discovery-created connection that predates hook mount', async () => {
+    setStorageMode('resolve');
     setConnectedDeviceIds(['DISCOVERY_PEER']);
     setPeerConnectionInfo({
       DISCOVERY_PEER: { state: 'CONNECTED', deviceId: 'DISCOVERY_PEER', mtu: 512 },
@@ -394,13 +409,23 @@ describe('useBLEVoiceMode — authoritative Link enablement target', () => {
     });
 
     expect(api().enabled).toBe(true);
-    expect(api().status).toBe('WAITING_FOR_SPEECH');
+    expect(api().status).toBe('CONNECTING_MESH_ROUTE');
     expect(api().voiceError).toBeNull();
     expect(mockNativeBLE.getConnectedDeviceIds).toHaveBeenCalled();
     expect(mockNativeBLE.getConnectionState).toHaveBeenCalledWith('DISCOVERY_PEER');
+
+    await act(async () => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: buildRemoteAnnounceFrame('0x00000000000000bb'),
+        fromDevice: 'DISCOVERY_PEER',
+      });
+    });
+    await act(async () => {});
+    expect(api().status).toBe('WAITING_FOR_SPEECH');
   });
 
   it('uses the first verified native key deterministically with multiple connected peers', async () => {
+    setStorageMode('resolve');
     setConnectedDeviceIds(['PEER_B', 'PEER_A']);
     setPeerConnectionInfo({
       PEER_B: { state: 'CONNECTED', deviceId: 'PEER_B', mtu: 512 },
@@ -414,6 +439,14 @@ describe('useBLEVoiceMode — authoritative Link enablement target', () => {
     await act(async () => {
       await api().toggleVoiceMode();
     });
+    await act(async () => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: buildRemoteAnnounceFrame('0x00000000000000bb'),
+        fromDevice: 'PEER_B',
+      });
+    });
+    await act(async () => {});
+    mockNativeBLE.send.mockClear();
     mockNativeBLE.getConnectionState.mockClear();
 
     const turn = api().beginPttTurn();
@@ -468,6 +501,7 @@ describe('useBLEVoiceMode — authoritative Link enablement target', () => {
   });
 
   it('uses the current reconnect key instead of the stale prior key', async () => {
+    setStorageMode('resolve');
     setConnectedDeviceIds(['OLD_PEER']);
     setPeerConnectionInfo({
       OLD_PEER: { state: 'CONNECTED', deviceId: 'OLD_PEER', mtu: 512 },
@@ -478,6 +512,13 @@ describe('useBLEVoiceMode — authoritative Link enablement target', () => {
     await act(async () => {
       await api().toggleVoiceMode();
     });
+    await act(async () => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: buildRemoteAnnounceFrame('0x00000000000000bb'),
+        fromDevice: 'OLD_PEER',
+      });
+    });
+    await act(async () => {});
     await act(async () => {
       await api().toggleVoiceMode();
     });
@@ -493,17 +534,95 @@ describe('useBLEVoiceMode — authoritative Link enablement target', () => {
       await api().toggleVoiceMode();
     });
     expect(api().enabled).toBe(true);
+    expect(api().status).toBe('CONNECTING_MESH_ROUTE');
     expect(mockNativeBLE.getConnectionState).toHaveBeenCalledWith('NEW_PEER');
     expect(mockNativeBLE.getConnectionState).not.toHaveBeenCalledWith('OLD_PEER');
 
     const turn = api().beginPttTurn();
     await act(async () => {});
-    expect(mockNativeBLE.send.mock.calls.some((call: any[]) => call[1] === 'NEW_PEER')).toBe(true);
-    expect(mockNativeBLE.send.mock.calls.some((call: any[]) => call[1] === 'OLD_PEER')).toBe(false);
-    await act(async () => {
-      jest.advanceTimersByTime(1600);
-    });
+    const txControlTargets = mockNativeBLE.send.mock.calls
+      .filter((call: any[]) => {
+        try {
+          return v6bDecode(base64ToBytes(call[0])).frameType === V6B_FRAME_TX_CONTROL;
+        } catch {
+          return false;
+        }
+      })
+      .map((call: any[]) => call[1]);
+    expect(txControlTargets).not.toContain('NEW_PEER');
+    expect(txControlTargets).not.toContain('OLD_PEER');
     expect(await turn).toBe(false);
+  });
+
+  it('does not start a PTT turn while the direct ANNOUNCE route is pending', async () => {
+    setStorageMode('resolve');
+    setConnectedDeviceIds(['ROUTE_PENDING']);
+    setPeerConnectionInfo({
+      ROUTE_PENDING: { state: 'CONNECTED', deviceId: 'ROUTE_PENDING', mtu: 512 },
+    });
+
+    const r = await renderHook();
+    api = r.api;
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+
+    expect(api().status).toBe('CONNECTING_MESH_ROUTE');
+    const sendsBefore = mockNativeBLE.send.mock.calls.length;
+    expect(await api().beginPttTurn()).toBe(false);
+    expect(mockNativeBLE.send.mock.calls.length).toBe(sendsBefore);
+    expect(api().status).toBe('CONNECTING_MESH_ROUTE');
+  });
+
+  it('allows PTT ownership only after the exact direct route is registered', async () => {
+    setStorageMode('resolve');
+    setConnectedDeviceIds(['ROUTE_READY']);
+    setPeerConnectionInfo({
+      ROUTE_READY: { state: 'CONNECTED', deviceId: 'ROUTE_READY', mtu: 512 },
+    });
+
+    const r = await renderHook();
+    api = r.api;
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+    expect(api().status).toBe('CONNECTING_MESH_ROUTE');
+
+    await act(async () => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: buildRemoteAnnounceFrame('0x00000000000000cc'),
+        fromDevice: 'ROUTE_READY',
+      });
+    });
+    await act(async () => {});
+    expect(api().status).toBe('WAITING_FOR_SPEECH');
+
+    const turn = api().beginPttTurn();
+    await act(async () => {});
+    const requestCall = mockNativeBLE.send.mock.calls.find((call: any[]) => {
+      if (call[1] !== 'ROUTE_READY') return false;
+      try {
+        const frame = v6bDecode(base64ToBytes(call[0]));
+        const control = decodeTxControlPayload(frame.payload);
+        return control?.op === TX_OP_REQUEST;
+      } catch {
+        return false;
+      }
+    });
+    expect(requestCall).toBeDefined();
+    const requestFrame = v6bDecode(base64ToBytes(requestCall![0]));
+    const request = decodeTxControlPayload(requestFrame.payload)!;
+    await act(async () => {
+      emitBLE('BLE_DATA_RECEIVED', {
+        data: bytesToBase64(buildTxControlFrame(1, {
+          op: TX_OP_GRANT,
+          txId: 7,
+          requestId: request.requestId,
+        })),
+        fromDevice: 'ROUTE_READY',
+      });
+    });
+    expect(await turn).toBe(true);
   });
 });
 
@@ -2488,6 +2607,32 @@ describe('useBLEVoiceMode — ANNOUNCE bounded retry & handshake', () => {
     });
     await settle();
     expect(await announceSendsTo('B_reconnected')).toBe(1);
+  });
+
+  it('disconnect clears direct route readiness and reconnect requires a fresh ANNOUNCE', async () => {
+    setStorageMode('resolve');
+    setConnectedDeviceIds(['B']);
+    const r = await renderHook();
+    api = r.api;
+
+    await announceToConnectedPeer('B');
+    await registerRemotePeer('B', NODE_B);
+    await enableVoice('B');
+    expect(api().status).toBe('WAITING_FOR_SPEECH');
+
+    act(() => {
+      emitBLE('BLE_DISCONNECTED', { deviceId: 'B', reason: 'REMOTE' });
+    });
+    await settle();
+    expect(api().enabled).toBe(false);
+
+    await announceToConnectedPeer('B');
+    await enableVoice('B');
+    expect(api().status).toBe('CONNECTING_MESH_ROUTE');
+    expect(await api().beginPttTurn()).toBe(false);
+
+    await registerRemotePeer('B', NODE_B);
+    expect(api().status).toBe('WAITING_FOR_SPEECH');
   });
 
   it('incoming ANNOUNCE answers with our own ANNOUNCE; duplicate ANNOUNCE triggers no further answer (no loop)', async () => {

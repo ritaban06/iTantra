@@ -241,6 +241,7 @@ describe('BitChatBLEAdapter ANNOUNCE handshake', () => {
 
     expect(kind).toBe('announce');
     expect(a.getNodeIdForBlePeer('ble_B')).toBe(bNodeId);
+    expect(a.isDirectPeerReady('ble_B')).toBe(true);
     expect(announced).toEqual([{ blePeerId: 'ble_B', nodeId: bNodeId }]);
   });
 
@@ -284,11 +285,13 @@ describe('BitChatBLEAdapter ANNOUNCE handshake', () => {
     await a.receive(raw, 'ble_B');
     a.unregisterPeer('ble_B');
     expect(a.getNodeIdForBlePeer('ble_B')).toBeUndefined();
+    expect(a.isDirectPeerReady('ble_B')).toBe(false);
 
     // Simulates a reconnect: same peer announces again → hook fires again.
     await a.receive(raw, 'ble_B');
     expect(fireCount).toBe(2);
     expect(a.getNodeIdForBlePeer('ble_B')).toBe(bNodeId);
+    expect(a.isDirectPeerReady('ble_B')).toBe(true);
   });
 
   it('re-ANNOUNCE replaces stale BLE and NodeId indexes bijectively', () => {
