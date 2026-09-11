@@ -495,13 +495,18 @@ describe('useBLE — per-peer connection state', () => {
     expect(peerStateOf(api(), 'C')!.state).toBe('CONNECTED');
   });
 
-  it('20. cleanup removes listeners on unmount', async () => {
+  it('20. cleanup removes listeners without stopping process-wide advertising', async () => {
     const { renderer, api } = await renderUseBLE();
     expect(nativeMock.__listenerCount('BLE_CONNECTED')).toBeGreaterThan(0);
     await act(async () => {
       renderer.unmount();
     });
     expect(nativeMock.__listenerCount('BLE_CONNECTED')).toBe(0);
+    // Advertising owns the native GATT server. ConnectScreen unmounts when
+    // navigation returns to Home, so hook cleanup must not tear down a live
+    // SERVER-role connection (or call the explicit disconnect API).
+    expect(mockNativeBLE.stopAdvertising).not.toHaveBeenCalled();
+    expect(mockNativeBLE.disconnect).not.toHaveBeenCalled();
     // Emitting after unmount must not throw.
     act(() => {
       emitEvent('BLE_CONNECTED', { deviceId: 'C', mtu: 512 });

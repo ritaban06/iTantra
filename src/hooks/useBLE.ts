@@ -357,10 +357,11 @@ export function useBLE() {
       subsRef.current.forEach((s) => s.remove());
       subsRef.current = [];
       pendingConnectsRef.current.clear();
-      // Stop native scanning/advertising on unmount.
-      // Do NOT disconnect GATT — the explicit user action (ConnectScreen) owns that.
+      // Scanning is screen-scoped, but advertising owns the process-wide GATT
+      // server. A useBLE instance can unmount simply because navigation pops
+      // ConnectScreen; stopping advertising there would stop the GATT server
+      // and disconnect an otherwise live SERVER-role peer.
       NativeBLE.stopScanning().catch(() => {});
-      NativeBLE.stopAdvertising().catch(() => {});
     };
   }, [notePeerMutation]);
 
