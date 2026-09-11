@@ -394,6 +394,14 @@ class BLEModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /** Return the exact device IDs used by the native connection registry. */
+    @ReactMethod
+    fun getConnectedDeviceIds(promise: Promise) {
+        val ids = Arguments.createArray()
+        connManager.getConnectedDeviceIds().forEach { ids.pushString(it) }
+        promise.resolve(ids)
+    }
+
     // ── Required by RN event emitter ──────────────────────────────────
 
     @ReactMethod
