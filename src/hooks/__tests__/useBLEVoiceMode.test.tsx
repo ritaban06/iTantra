@@ -151,6 +151,8 @@ const mockNativeSTT: any = jest.requireMock('../../native/NativeSTT').default;
 jest.mock('../../native/NativeBLE', () => {
   const listeners = new Map<string, Set<(event?: any) => void>>();
   let connectionInfo: any = { state: 'IDLE', deviceId: '', mtu: 23 };
+  let connectedDeviceIds: string[] = [];
+  let peerConnectionInfo: Record<string, any> = {};
 
   const subscribe = (name: string, cb: (event?: any) => void) => {
     let set = listeners.get(name);
@@ -162,22 +164,35 @@ jest.mock('../../native/NativeBLE', () => {
     return { remove: () => set!.delete(cb) };
   };
 
+  const getConnectedDeviceIds = jest.fn(async () => [...connectedDeviceIds]);
+  const nativeApi: any = {
+    getDeviceId: jest.fn(async () => 'LOCAL'),
+    isBluetoothEnabled: jest.fn(async () => true),
+    getConnectionState: jest.fn(async (deviceId?: string) =>
+      deviceId && peerConnectionInfo[deviceId]
+        ? peerConnectionInfo[deviceId]
+        : connectionInfo,
+    ),
+    send: jest.fn(async () => true),
+    disconnect: jest.fn(async () => true),
+    connect: jest.fn(async () => true),
+    onDataReceived: (cb: (event?: any) => void) => subscribe('BLE_DATA_RECEIVED', cb),
+    onDisconnected: (cb: (event?: any) => void) => subscribe('BLE_DISCONNECTED', cb),
+    onConnected: (cb: (event?: any) => void) => subscribe('BLE_CONNECTED', cb),
+    onSendFailed: (cb: (event?: any) => void) => subscribe('BLE_SEND_FAILED', cb),
+    onSendSuccess: (cb: (event?: any) => void) => subscribe('BLE_SEND_SUCCESS', cb),
+  };
+
   return {
     __esModule: true,
-    default: {
-      getDeviceId: jest.fn(async () => 'LOCAL'),
-      isBluetoothEnabled: jest.fn(async () => true),
-      getConnectionState: jest.fn(async () => connectionInfo),
-      send: jest.fn(async () => true),
-      disconnect: jest.fn(async () => true),
-      connect: jest.fn(async () => true),
-      onDataReceived: (cb: (event?: any) => void) => subscribe('BLE_DATA_RECEIVED', cb),
-      onDisconnected: (cb: (event?: any) => void) => subscribe('BLE_DISCONNECTED', cb),
-      onConnected: (cb: (event?: any) => void) => subscribe('BLE_CONNECTED', cb),
-      onSendFailed: (cb: (event?: any) => void) => subscribe('BLE_SEND_FAILED', cb),
-      onSendSuccess: (cb: (event?: any) => void) => subscribe('BLE_SEND_SUCCESS', cb),
-    },
+    default: nativeApi,
     __emit: (name: string, event?: any) => {
+      if (event?.deviceId && name === 'BLE_CONNECTED' && !connectedDeviceIds.includes(event.deviceId)) {
+        connectedDeviceIds.push(event.deviceId);
+      }
+      if (event?.deviceId && name === 'BLE_DISCONNECTED') {
+        connectedDeviceIds = connectedDeviceIds.filter((id) => id !== event.deviceId);
+      }
       const set = listeners.get(name);
       if (set) {
         Array.from(set).forEach((cb) => cb(event));
@@ -187,6 +202,19 @@ jest.mock('../../native/NativeBLE', () => {
     __setConnectionInfo: (info: any) => {
       connectionInfo = info;
     },
+    __enablePeerListApi: () => {
+      nativeApi.getConnectedDeviceIds = getConnectedDeviceIds;
+    },
+    __disablePeerListApi: () => {
+      delete nativeApi.getConnectedDeviceIds;
+    },
+    __setConnectedDeviceIds: (ids: string[]) => {
+      connectedDeviceIds = [...ids];
+      nativeApi.getConnectedDeviceIds = getConnectedDeviceIds;
+    },
+    __setPeerConnectionInfo: (info: Record<string, any>) => {
+      peerConnectionInfo = { ...info };
+    },
   };
 });
 
@@ -194,6 +222,9 @@ const nativeMock: any = jest.requireMock('../../native/NativeBLE');
 const mockNativeBLE = nativeMock.default;
 const emitBLE = nativeMock.__emit as (name: string, event?: any) => void;
 const setConnectionInfo = nativeMock.__setConnectionInfo as (info: any) => void;
+const setConnectedDeviceIds = nativeMock.__setConnectedDeviceIds as (ids: string[]) => void;
+const setPeerConnectionInfo = nativeMock.__setPeerConnectionInfo as (info: Record<string, any>) => void;
+const disablePeerListApi = nativeMock.__disablePeerListApi as () => void;
 
 // ── Shared helpers ──────────────────────────────────────────────────────
 
@@ -336,12 +367,144 @@ beforeEach(() => {
   setStorageMode('hang'); // default: direct V6B path for Step 6 tests
   setStorageMap({}); // no persisted identity by default
   setConnectionInfo({ state: 'IDLE', deviceId: '', mtu: 23 });
+  setConnectedDeviceIds([]);
+  disablePeerListApi();
+  setPeerConnectionInfo({});
   mockNativeSTT.muteMic.mockClear();
   mockNativeSTT.unmuteMic.mockClear();
 });
 
 afterEach(() => {
   jest.useRealTimers();
+});
+
+describe('useBLEVoiceMode — authoritative Link enablement target', () => {
+  it('enables Link from a Discovery-created connection that predates hook mount', async () => {
+    setConnectedDeviceIds(['DISCOVERY_PEER']);
+    setPeerConnectionInfo({
+      DISCOVERY_PEER: { state: 'CONNECTED', deviceId: 'DISCOVERY_PEER', mtu: 512 },
+    });
+    setConnectionInfo({ state: 'IDLE', deviceId: '', mtu: 23 });
+
+    const r = await renderHook();
+    api = r.api;
+
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+
+    expect(api().enabled).toBe(true);
+    expect(api().status).toBe('WAITING_FOR_SPEECH');
+    expect(api().voiceError).toBeNull();
+    expect(mockNativeBLE.getConnectedDeviceIds).toHaveBeenCalled();
+    expect(mockNativeBLE.getConnectionState).toHaveBeenCalledWith('DISCOVERY_PEER');
+  });
+
+  it('uses the first verified native key deterministically with multiple connected peers', async () => {
+    setConnectedDeviceIds(['PEER_B', 'PEER_A']);
+    setPeerConnectionInfo({
+      PEER_B: { state: 'CONNECTED', deviceId: 'PEER_B', mtu: 512 },
+      PEER_A: { state: 'CONNECTED', deviceId: 'PEER_A', mtu: 247 },
+    });
+    setConnectionInfo({ state: 'IDLE', deviceId: '', mtu: 23 });
+
+    const r = await renderHook();
+    api = r.api;
+
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+    mockNativeBLE.getConnectionState.mockClear();
+
+    const turn = api().beginPttTurn();
+    await act(async () => {});
+
+    expect(mockNativeBLE.getConnectionState).toHaveBeenCalledWith('PEER_B');
+    expect(mockNativeBLE.getConnectionState).not.toHaveBeenCalledWith('PEER_A');
+    expect(mockNativeBLE.send.mock.calls.some((call: any[]) => call[1] === 'PEER_B')).toBe(true);
+    expect(mockNativeBLE.send.mock.calls.some((call: any[]) => call[1] === 'PEER_A')).toBe(false);
+
+    await act(async () => {
+      jest.advanceTimersByTime(1600);
+    });
+    expect(await turn).toBe(false);
+  });
+
+  it('retains the correct error when no connected native peer exists', async () => {
+    setConnectedDeviceIds([]);
+    setConnectionInfo({ state: 'CONNECTED', deviceId: 'LEGACY_ONLY', mtu: 512 });
+
+    const r = await renderHook();
+    api = r.api;
+
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+
+    expect(api().enabled).toBe(false);
+    expect(api().voiceError).toBe('Connect to a device first');
+    expect(mockNativeBLE.getConnectionState).not.toHaveBeenCalled();
+  });
+
+  it('clears a stale Link error after a later exact-peer enable succeeds', async () => {
+    const r = await renderHook();
+    api = r.api;
+
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+    expect(api().voiceError).toBe('Connect to a device first');
+
+    setConnectedDeviceIds(['FRESH_PEER']);
+    setPeerConnectionInfo({
+      FRESH_PEER: { state: 'CONNECTED', deviceId: 'FRESH_PEER', mtu: 512 },
+    });
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+
+    expect(api().enabled).toBe(true);
+    expect(api().voiceError).toBeNull();
+  });
+
+  it('uses the current reconnect key instead of the stale prior key', async () => {
+    setConnectedDeviceIds(['OLD_PEER']);
+    setPeerConnectionInfo({
+      OLD_PEER: { state: 'CONNECTED', deviceId: 'OLD_PEER', mtu: 512 },
+    });
+
+    const r = await renderHook();
+    api = r.api;
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+
+    setConnectedDeviceIds(['NEW_PEER']);
+    setPeerConnectionInfo({
+      NEW_PEER: { state: 'CONNECTED', deviceId: 'NEW_PEER', mtu: 512 },
+    });
+    mockNativeBLE.getConnectionState.mockClear();
+    mockNativeBLE.send.mockClear();
+
+    await act(async () => {
+      await api().toggleVoiceMode();
+    });
+    expect(api().enabled).toBe(true);
+    expect(mockNativeBLE.getConnectionState).toHaveBeenCalledWith('NEW_PEER');
+    expect(mockNativeBLE.getConnectionState).not.toHaveBeenCalledWith('OLD_PEER');
+
+    const turn = api().beginPttTurn();
+    await act(async () => {});
+    expect(mockNativeBLE.send.mock.calls.some((call: any[]) => call[1] === 'NEW_PEER')).toBe(true);
+    expect(mockNativeBLE.send.mock.calls.some((call: any[]) => call[1] === 'OLD_PEER')).toBe(false);
+    await act(async () => {
+      jest.advanceTimersByTime(1600);
+    });
+    expect(await turn).toBe(false);
+  });
 });
 
 // ── Tests ──────────────────────────────────────────────────────────────

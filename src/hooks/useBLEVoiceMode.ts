@@ -1682,6 +1682,47 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     }
   }, [releaseTxOwnership]);
 
+  /**
+   * Select the first currently connected native BLE key in native order.
+   *
+   * The peer list is authoritative for Link enablement. The legacy
+   * no-argument state query is retained only for older native modules that do
+   * not expose getConnectedDeviceIds yet.
+   */
+  const getConnectedVoicePeer = useCallback(async (): Promise<string | null> => {
+    const getConnectedDeviceIds = (NativeBLE as any).getConnectedDeviceIds;
+    if (typeof getConnectedDeviceIds === 'function') {
+      try {
+        const ids = await getConnectedDeviceIds();
+        if (!Array.isArray(ids)) return null;
+
+        for (const deviceId of ids) {
+          if (typeof deviceId !== 'string' || deviceId.length === 0) continue;
+          try {
+            const info = await NativeBLE.getConnectionState(deviceId);
+            if (info?.state === 'CONNECTED' && info.deviceId === deviceId) {
+              return deviceId;
+            }
+          } catch {
+            // A stale/unqueryable key is not a valid Link target.
+          }
+        }
+        return null;
+      } catch {
+        // Compatibility fallback for a native module predating the peer-list
+        // method. A successful peer-list response (including []) never falls
+        // through to this legacy query.
+      }
+    }
+
+    try {
+      const info = await NativeBLE.getConnectionState();
+      return info?.state === 'CONNECTED' && info.deviceId ? info.deviceId : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const toggleVoiceMode = useCallback(async () => {
     if (enabled) {
       // Turn off. Voice-only state is reset; BITCHAT mesh lifecycle is
@@ -1699,11 +1740,14 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     } else {
       // Turn on — require BLE connection.
       try {
-        const info = await NativeBLE.getConnectionState();
-        if (info.state !== 'CONNECTED') {
+        const connectedPeerId = await getConnectedVoicePeer();
+        if (!connectedPeerId) {
           setVoiceError('Connect to a device first');
           return;
         }
+        // Reuse the exact native key verified above for the first PTT turn;
+        // reconciliation will refresh this set from the same native source.
+        connectedPeersRef.current.add(connectedPeerId);
         setEnabled(true);
         setStatus('WAITING_FOR_SPEECH');
         setVoiceError(null);
@@ -1713,7 +1757,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         setVoiceError(e.message);
       }
     }
-  }, [enabled]);
+  }, [enabled, getConnectedVoicePeer]);
 
   const clearError = useCallback(() => {
     setVoiceError(null);
