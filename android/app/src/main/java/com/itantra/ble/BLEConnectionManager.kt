@@ -86,12 +86,32 @@ class BLEConnectionManager(private val context: Context) {
      *
      * @return null on success, or an error string.
      */
-    fun send(data: ByteArray, deviceId: String): String? {
+    fun send(data: ByteArray, deviceId: String, diagnosticId: String? = null): String? {
         val peerState = peerStates[deviceId]
+        val serverTargetDevice = if (peerState?.role == ConnectionRole.SERVER) {
+            deviceMap[deviceId]
+        } else {
+            null
+        }
+        val serverDiagnostics = gattServer.getNotificationDiagnostics(serverTargetDevice)
         Log.d(
             "ITANTRA_MVP",
-            "NATIVE_SEND target=$deviceId nativeState=${peerState?.state ?: "MISSING"} " +
+            "msgId=${diagnosticId ?: "control"} STEP=NATIVE_SEND_START target=$deviceId " +
+                "frameBytes=${data.size} nativeState=${peerState?.state ?: "MISSING"} " +
                 "role=${peerState?.role ?: "UNKNOWN"}"
+        )
+        Log.d(
+            "ITANTRA_MVP",
+            "msgId=${diagnosticId ?: "control"} STEP=TX_TARGET blePeerId=${serverTargetDevice?.address ?: deviceId} " +
+                "nativeConnectionState=${peerState?.state ?: "MISSING"} " +
+                "nativePeerExists=${peerState != null} " +
+                "targetBluetoothDevicePresent=${serverTargetDevice != null} " +
+                "role=${peerState?.role ?: "UNKNOWN"} " +
+                "routeReady=${peerState?.state == ConnectionState.CONNECTED} " +
+                "cccdReady=${if (peerState?.role == ConnectionRole.SERVER) serverDiagnostics.cccdEnabled else "NOT_APPLICABLE"} " +
+                "serverConnectedClientPresent=${serverDiagnostics.connectedClientPresent} " +
+                "serverGeneration=${serverDiagnostics.serverGeneration} " +
+                "serverConnectionGeneration=${serverDiagnostics.connectionGeneration ?: "NONE"}"
         )
         Log.d(
             "ITANTRA_SEND",
@@ -103,15 +123,15 @@ class BLEConnectionManager(private val context: Context) {
 
         return when (peerState.role) {
             ConnectionRole.CLIENT -> {
-                gattClient.send(data, deviceId)
+                gattClient.send(data, deviceId, diagnosticId)
             }
             ConnectionRole.SERVER -> {
-                val btDevice = deviceMap[deviceId]
+                val btDevice = serverTargetDevice
                     ?: bluetoothManager?.adapter?.getRemoteDevice(
                         peerState.deviceId
                     )
                 if (btDevice != null && gattServer.isRunning) {
-                    gattServer.sendNotification(data, btDevice)
+                    gattServer.sendNotification(data, btDevice, diagnosticId)
                 } else {
                     "NOT_CONNECTED"
                 }

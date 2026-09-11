@@ -99,8 +99,10 @@ export default {
    * @param base64Data Base64-encoded bytes to send.
    * @param deviceId Optional target peer ID. If omitted, sends to legacy connected peer.
    */
-  send: (base64Data: string, deviceId?: string): Promise<boolean> =>
-    deviceId ? NativeBLE.send(base64Data, { deviceId }) : NativeBLE.send(base64Data, null),
+  send: (base64Data: string, deviceId?: string, diagnosticId?: string): Promise<boolean> =>
+    deviceId
+      ? NativeBLE.send(base64Data, { deviceId, diagnosticId: diagnosticId ?? '' })
+      : NativeBLE.send(base64Data, null),
 
   getConnectionState: (deviceId?: string): Promise<ConnectionStateInfo> =>
     deviceId ? NativeBLE.getConnectionState({ deviceId }) : NativeBLE.getConnectionState(null),

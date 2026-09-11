@@ -311,6 +311,7 @@ class BLEModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun send(base64Data: String, options: ReadableMap?, promise: Promise) {
         val targetDeviceId = options?.getString("deviceId")
+        val diagnosticId = options?.getString("diagnosticId")?.takeIf { it.isNotBlank() }
 
         val data = try {
             Base64.decode(base64Data, Base64.NO_WRAP)
@@ -326,7 +327,8 @@ class BLEModule(reactContext: ReactApplicationContext) :
             val peerState = connManager.peerStates[targetDeviceId]
             Log.d(
                 "ITANTRA_MVP",
-                "NATIVE_SEND target=$targetDeviceId nativeState=${peerState?.state ?: "MISSING"} " +
+                "msgId=${diagnosticId ?: "control"} STEP=NATIVE_SEND_START target=$targetDeviceId " +
+                    "frameBytes=${data.size} nativeState=${peerState?.state ?: "MISSING"} " +
                     "role=${peerState?.role ?: "UNKNOWN"}"
             )
             Log.d(
@@ -338,7 +340,7 @@ class BLEModule(reactContext: ReactApplicationContext) :
                 promise.reject("NOT_CONNECTED", "Peer $targetDeviceId is not connected")
                 return
             }
-            val error = connManager.send(data, targetDeviceId)
+            val error = connManager.send(data, targetDeviceId, diagnosticId)
             Log.d(
                 "ITANTRA_SEND",
                 "requestedDeviceId=$targetDeviceId result=${error ?: "OK"}"

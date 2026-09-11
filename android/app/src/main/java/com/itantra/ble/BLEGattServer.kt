@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.util.Log
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * GATT server that hosts the iTantra BLE service.
@@ -39,6 +40,22 @@ class BLEGattServer(private val context: Context) {
     private val connectedClients = mutableSetOf<BluetoothDevice>()
     private val connectionGuard = ServerConnectionGuard()
     private val notificationSubscriptions = ServerNotificationSubscriptionGuard()
+    /** Current in-flight notification correlation, keyed by remote BLE address. */
+    private val notificationDiagnosticIds = ConcurrentHashMap<String, String>()
+    private var serverGeneration = 0L
+
+    /** Snapshot of the precise server-side state that determines notify eligibility. */
+    data class NotificationDiagnostics(
+        val connectedClientPresent: Boolean,
+        val cccdEnabled: Boolean,
+        val characteristicPresent: Boolean,
+        val connectedClientCount: Int,
+        val serverGeneration: Long,
+        val connectionGeneration: Long?,
+        val characteristicUuid: UUID?,
+        val characteristicProperties: Int?,
+        val running: Boolean,
+    )
 
     var listener: Listener? = null
 
@@ -91,7 +108,12 @@ class BLEGattServer(private val context: Context) {
 
         gattServer = server
         isRunning = true
-        Log.d(TAG, "GATT server started")
+        serverGeneration += 1
+        Log.d(
+            "ITANTRA_MVP",
+            "SERVER_SCHEMA service=${BLEConstants.SERVICE_UUID} rx=${BLEConstants.RX_CHAR_UUID} " +
+                "cccd=${BLEConstants.CCCD_UUID} rxProperties=${rxChar.properties}"
+        )
         return null
     }
 
@@ -113,6 +135,7 @@ class BLEGattServer(private val context: Context) {
             connectedClients.clear()
             connectionGuard.clear()
             notificationSubscriptions.clear()
+            notificationDiagnosticIds.clear()
             gattServer?.close()
         } catch (e: Exception) {
             return "STOP_SERVER_ERROR: ${e.message}"
@@ -148,22 +171,31 @@ class BLEGattServer(private val context: Context) {
      * @return null on success, or an error string on failure.
      */
     @SuppressLint("MissingPermission")
-    fun sendNotification(data: ByteArray, device: BluetoothDevice): String? {
-        val connectedClient = getConnectedDevices().any { addressesEqual(it.address, device.address) }
-        val cccdEnabled = notificationSubscriptions.isEnabled(device.address)
+    fun sendNotification(data: ByteArray, device: BluetoothDevice, diagnosticId: String? = null): String? {
+        val traceId = diagnosticId ?: "control"
+        val diagnostics = getNotificationDiagnostics(device)
         val server = gattServer
         val rxChar = server?.getService(BLEConstants.SERVICE_UUID)
             ?.getCharacteristic(BLEConstants.RX_CHAR_UUID)
         Log.d(
             "ITANTRA_MVP",
-            "SERVER_SEND target=${device.address} connectedClient=$connectedClient " +
-                "cccdEnabled=$cccdEnabled characteristicReady=${rxChar != null} running=$isRunning"
+            "msgId=$traceId STEP=SERVER_SEND_START blePeerId=${device.address} " +
+                "connectedClientPresent=${diagnostics.connectedClientPresent} " +
+                "cccdEnabled=${diagnostics.cccdEnabled} " +
+                "characteristicPresent=${diagnostics.characteristicPresent} " +
+                "connectedClientCount=${diagnostics.connectedClientCount} " +
+                "serverGeneration=${diagnostics.serverGeneration} " +
+                "connectionGeneration=${diagnostics.connectionGeneration ?: "NONE"} " +
+                "serviceUuid=${BLEConstants.SERVICE_UUID} " +
+                "characteristicUuid=${diagnostics.characteristicUuid ?: "NONE"} " +
+                "cccdUuid=${BLEConstants.CCCD_UUID} " +
+                "propertyFlags=${diagnostics.characteristicProperties ?: -1} running=${diagnostics.running}"
         )
-        if (!connectedClient) {
+        if (!diagnostics.connectedClientPresent) {
             Log.w(TAG, "sendNotification rejected: ${device.address} is not a current server client")
             return "NOT_CONNECTED"
         }
-        if (!cccdEnabled) return "NOTIFICATION_NOT_READY"
+        if (!diagnostics.cccdEnabled) return "NOTIFICATION_NOT_READY"
         if (server == null) return "SERVER_NOT_RUNNING"
         if (rxChar == null) return "RX_CHARACTERISTIC_NOT_FOUND"
 
@@ -172,17 +204,48 @@ class BLEGattServer(private val context: Context) {
         // settles the synchronous String? contract via a latch.
         val completion = GattOperationCompletion()
         GattWriteQueue.enqueue(device.address, write = {
+            // This closure runs only when this exact queue entry becomes the
+            // in-flight platform operation, so the callback ID cannot belong
+            // to a later buffered packet.
+            notificationDiagnosticIds[device.address] = traceId
             rxChar.value = data
             val accepted = server.notifyCharacteristicChanged(device, rxChar, false)
             Log.d(
                 "ITANTRA_MVP",
-                "NOTIFY_REQUEST target=${device.address} bytes=${data.size} accepted=$accepted"
+                "msgId=$traceId STEP=SERVER_NOTIFY_CALL blePeerId=${device.address} " +
+                    "bytes=${data.size} booleanReturn=$accepted"
             )
             accepted
         }) { success ->
+            Log.d(
+                "ITANTRA_MVP",
+                "msgId=$traceId STEP=SERVER_QUEUE_COMPLETE blePeerId=${device.address} success=$success"
+            )
+            notificationDiagnosticIds.remove(device.address, traceId)
             completion.complete(success, "NOTIFY_FAILED")
         }
         return completion.await(10, "NOTIFY_TIMEOUT")
+    }
+
+    /** Native snapshot used by BLEConnectionManager's exact-send diagnostics. */
+    fun getNotificationDiagnostics(device: BluetoothDevice?): NotificationDiagnostics {
+        val server = gattServer
+        val rxChar = server?.getService(BLEConstants.SERVICE_UUID)
+            ?.getCharacteristic(BLEConstants.RX_CHAR_UUID)
+        val address = device?.address
+        return NotificationDiagnostics(
+            connectedClientPresent = address != null && getConnectedDevices().any {
+                addressesEqual(it.address, address)
+            },
+            cccdEnabled = address != null && notificationSubscriptions.isEnabled(address),
+            characteristicPresent = rxChar != null,
+            connectedClientCount = getConnectedDevices().size,
+            serverGeneration = serverGeneration,
+            connectionGeneration = address?.let { connectionGuard.currentGeneration(it) },
+            characteristicUuid = rxChar?.uuid,
+            characteristicProperties = rxChar?.properties,
+            running = isRunning,
+        )
     }
 
     /** Get all currently connected client devices. */
@@ -203,7 +266,8 @@ class BLEGattServer(private val context: Context) {
                     notificationSubscriptions.markConnected(device.address)
                     Log.d(
                         "ITANTRA_MVP",
-                        "SERVER_CONNECTED target=${device.address} generation=$generation notificationReady=false"
+                        "STEP=SERVER_CONNECTED blePeerId=${device.address} generation=$generation " +
+                            "serverGeneration=$serverGeneration notificationReady=false"
                     )
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
@@ -217,6 +281,7 @@ class BLEGattServer(private val context: Context) {
                     }
                     synchronized(connectedClients) { connectedClients.remove(device) }
                     notificationSubscriptions.remove(device.address)
+                    notificationDiagnosticIds.remove(device.address)
                     // Settle queued notifications so no send promise hangs.
                     GattWriteQueue.clear(device.address)
                     Log.d(TAG, "Client disconnected: ${device.address} [gen=$generation]")
@@ -263,7 +328,9 @@ class BLEGattServer(private val context: Context) {
                     notificationSubscriptions.setEnabled(device.address, enablesRxNotifications)
                 Log.d(
                     "ITANTRA_MVP",
-                    "CCCD_WRITE target=${device.address} rx=$enablesRxNotifications " +
+                    "STEP=CCCD_WRITE blePeerId=${device.address} serviceUuid=${BLEConstants.SERVICE_UUID} " +
+                        "characteristicUuid=${descriptor.characteristic?.uuid ?: "NONE"} " +
+                        "cccdUuid=${descriptor.uuid} rxEnabled=$enablesRxNotifications " +
                         "generation=${currentGeneration ?: "STALE"} becameReady=$becameReady"
                 )
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
@@ -276,12 +343,15 @@ class BLEGattServer(private val context: Context) {
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            // Capture before notifying the queue: queue completion may submit
+            // the next buffered notification and replace this per-peer ID.
+            val traceId = notificationDiagnosticIds[device.address] ?: "control"
             // Drive the per-peer notification queue: the next notify (if any)
             // is only submitted after this completion.
             GattWriteQueue.notifyCompleted(device.address, status == BluetoothGatt.GATT_SUCCESS)
             Log.d(
                 "ITANTRA_MVP",
-                "NOTIFY_CALLBACK target=${device.address} status=$status"
+                "msgId=$traceId STEP=SERVER_NOTIFY_CALLBACK blePeerId=${device.address} status=$status"
             )
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "Notification failed to ${device.address}: $status")

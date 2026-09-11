@@ -2,6 +2,7 @@ import { useReducer, useEffect, useCallback, useRef } from 'react';
 import { NativeEventEmitter, NativeModules } from 'react-native';
 import { appReducer, AppState } from '../state/appReducer';
 import { LocalLoopService } from '../services/LocalLoopService';
+import { getActiveVoiceMvpTrace } from '../diagnostics/VoiceMvpTrace';
 
 const { NativeSTT, NativeTTS } = NativeModules;
 
@@ -75,6 +76,11 @@ export function usePTT(useDirectSTT: boolean = false) {
     try {
       if (useDirectSTTRef.current) {
         // BLE Voice Mode: use direct NativeSTT (no local TTS intercept).
+        const trace = getActiveVoiceMvpTrace();
+        console.log(
+          `[ITANTRA_MVP] msgId=${trace?.packetId ?? 'unassigned'} STEP=STT_START ` +
+            `language=${languageCode}`,
+        );
         await NativeSTT.startListening(languageCode);
       } else {
         // Normal mode: use LocalLoopService (sets onFinalResultIntercept for local TTS).

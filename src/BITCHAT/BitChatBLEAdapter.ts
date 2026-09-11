@@ -52,10 +52,14 @@ import { PeerRegistry } from './peer/PeerRegistry';
 // ── Types ────────────────────────────────────────────────────────
 
 /** Callback to send raw bytes over BLE to a specific peer. */
-export type BleSendFn = (peerBleId: string, payload: Uint8Array) => Promise<void>;
+export type BleSendFn = (peerBleId: string, payload: Uint8Array, diagnosticId?: string) => Promise<void>;
 
 /** Callback for locally-delivered payloads (V6B frames for application decode). */
-export type LocalDeliverFn = (v6bPayload: Uint8Array, fromPeerId?: string) => void;
+export type LocalDeliverFn = (
+  v6bPayload: Uint8Array,
+  fromPeerId?: string,
+  diagnosticId?: string,
+) => void;
 
 export interface BitChatBLEAdapterParams {
   /** This node's BITCHAT identity. */
@@ -129,7 +133,11 @@ export class BitChatBLEAdapter {
         throw new Error(`No BLE mapping for peer ${peerId}`);
       }
       const encoded = bitChatEncode(packet);
-      await this.bleSend(mapping.blePeerId, encoded);
+      console.log(
+        `[ITANTRA_MVP] msgId=${packet.packetId} STEP=BITCHAT_FORWARD ` +
+          `blePeerId=${mapping.blePeerId} frameBytes=${encoded.length}`,
+      );
+      await this.bleSend(mapping.blePeerId, encoded, packet.packetId);
     };
 
     // deliver: called by RelayEngine for first-seen packets addressed to this node
@@ -148,7 +156,11 @@ export class BitChatBLEAdapter {
       const blePeerId = fromPeerId
         ? this.reverseMappings.get(fromPeerId)?.blePeerId
         : undefined;
-      this.onLocalDeliver(packet.payload, blePeerId);
+      console.log(
+        `[ITANTRA_MVP] msgId=${packet.packetId} STEP=LOCAL_DELIVERY ` +
+          `source=${packet.sourceNodeId} destination=${packet.destinationNodeId}`,
+      );
+      this.onLocalDeliver(packet.payload, blePeerId, packet.packetId);
     };
 
     this.relayEngine = new RelayEngine({
@@ -379,9 +391,9 @@ export class BitChatBLEAdapter {
       return null;
     }
     console.log(
-      `[ITANTRA_MVP] BITCHAT_RECEIVE localNode=${this.localNodeId} ` +
+      `[ITANTRA_MVP] msgId=${packet.packetId} STEP=BITCHAT_RECEIVE localNode=${this.localNodeId} ` +
         `source=${packet.sourceNodeId} destination=${packet.destinationNodeId} ` +
-        `type=${packet.packetType} packetId=${packet.packetId}`,
+        `type=${packet.packetType} packetId=${packet.packetId} ttl=${packet.ttl}`,
     );
 
     // V9C: ANNOUNCE is direct-link-only. Process locally, never relay.
@@ -421,6 +433,7 @@ export class BitChatBLEAdapter {
     packetId: PacketId,
     destinationNodeId: NodeId = NODE_ID_BROADCAST,
     ttl: number = DEFAULT_TTL,
+    fragmentCount: number = 1,
   ): Promise<number> {
     this.originatedPacketId = packetId;
 
@@ -434,10 +447,13 @@ export class BitChatBLEAdapter {
       flags: FLAGS_NONE,
       payload,
     };
+    const forwardPeerBleIds = this.meshRouter.getRelayPeers()
+      .map((nodeId) => this.reverseMappings.get(nodeId)?.blePeerId)
+      .filter((blePeerId): blePeerId is string => !!blePeerId);
     console.log(
-      `[ITANTRA_MVP] BITCHAT_ENCODE source=${packet.sourceNodeId} ` +
+      `[ITANTRA_MVP] msgId=${packet.packetId} STEP=BITCHAT_ORIGINATE source=${packet.sourceNodeId} ` +
         `destination=${packet.destinationNodeId} packetId=${packet.packetId} ttl=${packet.ttl} ` +
-        `payloadBytes=${payload.length}`,
+        `fragmentCount=${fragmentCount} payloadBytes=${payload.length} forwardPeerBleIds=[${forwardPeerBleIds.join(',')}]`,
     );
 
     return await this.relayEngine.originate(packet);
