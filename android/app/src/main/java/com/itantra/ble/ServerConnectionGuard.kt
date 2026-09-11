@@ -56,6 +56,11 @@ internal class ServerConnectionGuard {
         return active.generation
     }
 
+    /** Return the active generation for a current address-bound GATT request. */
+    @Synchronized
+    fun currentGeneration(address: String): Long? =
+        activeConnections[normalize(address)]?.generation
+
     @Synchronized
     fun clear() {
         activeConnections.clear()

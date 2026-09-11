@@ -301,6 +301,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
   /** Helper: send a V6B frame to a SPECIFIC BLE peer (peer-targeted). */
   const sendV6BFrameToPeer = useCallback(async (frame: Uint8Array, deviceId: string): Promise<void> => {
+    console.log(
+      `[ITANTRA_MVP] V6B_ENCODE target=${deviceId} frameBytes=${frame.length}`,
+    );
     await NativeBLE.send(bytesToBase64(frame), deviceId);
   }, []);
 
@@ -610,6 +613,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         const { seqManager } = getOrCreatePeerReliability(peerBleId);
         const seq = seqManager.nextSequence();
         const v6bFrame = v6bEncode(seq, V6B_FRAME_BITCHAT, payload);
+        console.log(
+          `[ITANTRA_MVP] V6B_ENCODE target=${peerBleId} frameBytes=${v6bFrame.length} ` +
+            `frameType=${V6B_FRAME_BITCHAT}`,
+        );
         await NativeBLE.send(bytesToBase64(v6bFrame), peerBleId);
       },
       onLocalDeliver: (v6bPayload: Uint8Array, fromPeerId?: string) => {
@@ -1069,6 +1076,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         }
         return;
       }
+      console.log(
+        `[ITANTRA_MVP] STT_FINAL textLength=${transcript.length} text=${JSON.stringify(transcript)}`,
+      );
 
       // ── Half-duplex gate: STT produced text, but we may not own the link. ──
       // Ownership is normally acquired at PTT press (beginPttTurn) so the
@@ -1090,6 +1100,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
       const v6aEncoded = encodeUnrestricted(semanticMsg);
       const byteLen = binaryGetEncodedByteLength(semanticMsg);
+      console.log(
+        `[ITANTRA_MVP] SEMANTIC_ENCODE bytes=${v6aEncoded.length} messageId=${semanticMsg.messageId}`,
+      );
 
       // V7 fragmentation: split if V6A exceeds V6B payload limit
       const fragments = splitV6A(v6aEncoded);
@@ -1283,6 +1296,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       }
 
       if (!decoded.trim()) return;
+      console.log(
+        `[ITANTRA_MVP] BLE_RECEIVE from=${event.fromDevice} bytes=${decoded.length}`,
+      );
 
       // Convert to Uint8Array for binary detection.
       let rawData: Uint8Array | string;
@@ -1313,6 +1329,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
             console.warn(`[BLE Voice] Malformed V6B frame dropped: ${e.message}`);
             return;
           }
+          console.log(
+            `[ITANTRA_MVP] V6B_DECODE type=${frame.frameType} source=${event.fromDevice} bytes=${rawData.length}`,
+          );
 
           // V8: intercept ACK/NACK before DATA processing — route to the
           // per-peer manager of the device that sent the frame.
@@ -1524,6 +1543,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
 
       // Speak via existing TTS using the text and language from the semantic message.
       const ttsLanguage = semanticMsg?.language ?? 'en';
+      console.log(`[ITANTRA_MVP] TTS text=${JSON.stringify(text)} language=${ttsLanguage}`);
       NativeTTS.speak(text, ttsLanguage, false)
         .then(() => {
           // Unmute mic after TTS finishes.
@@ -1701,6 +1721,10 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       `[ITANTRA_TX] stage=beginPtt target=${target ?? ''} ` +
         `connectedPeersRef=[${[...connectedPeersRef.current].join(',')}] ` +
         `txOwner=${txOwnerRef.current}`,
+    );
+    console.log(
+      `[ITANTRA_MVP] TX_REQUEST target=${target ?? ''} txOwner=${txOwnerRef.current} ` +
+        `routeReady=${target ? isDirectRouteReady(target) : false}`,
     );
     if (!target) {
       setVoiceError('Connect to a device first');

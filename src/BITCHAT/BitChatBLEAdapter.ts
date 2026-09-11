@@ -378,6 +378,11 @@ export class BitChatBLEAdapter {
     if (!packet) {
       return null;
     }
+    console.log(
+      `[ITANTRA_MVP] BITCHAT_RECEIVE localNode=${this.localNodeId} ` +
+        `source=${packet.sourceNodeId} destination=${packet.destinationNodeId} ` +
+        `type=${packet.packetType} packetId=${packet.packetId}`,
+    );
 
     // V9C: ANNOUNCE is direct-link-only. Process locally, never relay.
     if (packet.packetType === PACKET_TYPE_ANNOUNCE) {
@@ -429,6 +434,11 @@ export class BitChatBLEAdapter {
       flags: FLAGS_NONE,
       payload,
     };
+    console.log(
+      `[ITANTRA_MVP] BITCHAT_ENCODE source=${packet.sourceNodeId} ` +
+        `destination=${packet.destinationNodeId} packetId=${packet.packetId} ttl=${packet.ttl} ` +
+        `payloadBytes=${payload.length}`,
+    );
 
     return await this.relayEngine.originate(packet);
   }

@@ -89,6 +89,11 @@ class BLEConnectionManager(private val context: Context) {
     fun send(data: ByteArray, deviceId: String): String? {
         val peerState = peerStates[deviceId]
         Log.d(
+            "ITANTRA_MVP",
+            "NATIVE_SEND target=$deviceId nativeState=${peerState?.state ?: "MISSING"} " +
+                "role=${peerState?.role ?: "UNKNOWN"}"
+        )
+        Log.d(
             "ITANTRA_SEND",
             "requestedDeviceId=$deviceId isConnectedTo=${peerState?.state == ConnectionState.CONNECTED} " +
                 "peerState=${peerState?.state ?: "MISSING"} role=${peerState?.role ?: "UNKNOWN"}"
@@ -312,6 +317,10 @@ class BLEConnectionManager(private val context: Context) {
             override fun onDataReceived(data: ByteArray, device: BluetoothDevice) {
                 // Data received from a connected client (this phone is server role).
                 val fromDeviceId = findDeviceIdByAddress(device.address) ?: device.address
+                Log.d(
+                    "ITANTRA_MVP",
+                    "BLE_RECEIVE from=$fromDeviceId bytes=${data.size} path=SERVER_WRITE"
+                )
                 listener?.onDataReceived(data, fromDeviceId)
             }
         }
@@ -334,6 +343,10 @@ class BLEConnectionManager(private val context: Context) {
             override fun onDataReceived(deviceId: String, data: ByteArray) {
                 // Data received from remote device (this phone is client role).
                 // Use the deviceId provided by the per-peer callback.
+                Log.d(
+                    "ITANTRA_MVP",
+                    "BLE_RECEIVE from=$deviceId bytes=${data.size} path=CLIENT_NOTIFICATION"
+                )
                 listener?.onDataReceived(data, deviceId)
             }
 

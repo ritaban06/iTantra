@@ -325,6 +325,11 @@ class BLEModule(reactContext: ReactApplicationContext) :
             val connected = connManager.isConnectedTo(targetDeviceId)
             val peerState = connManager.peerStates[targetDeviceId]
             Log.d(
+                "ITANTRA_MVP",
+                "NATIVE_SEND target=$targetDeviceId nativeState=${peerState?.state ?: "MISSING"} " +
+                    "role=${peerState?.role ?: "UNKNOWN"}"
+            )
+            Log.d(
                 "ITANTRA_SEND",
                 "requestedDeviceId=$targetDeviceId isConnectedTo=$connected " +
                     "peerState=${peerState?.state ?: "MISSING"} role=${peerState?.role ?: "UNKNOWN"}"

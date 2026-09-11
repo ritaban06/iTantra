@@ -283,26 +283,19 @@ class BLEGattClient(private val context: Context) {
         // Enqueue the write — the queue serializes per peer and the returned
         // promise completes on the actual onCharacteristicWrite callback, so
         // fragment N+1 is never submitted before fragment N completed.
-        var submissionError: String? = null
-        val latch = java.util.concurrent.CountDownLatch(1)
+        val completion = GattOperationCompletion()
         peer.writeQueue.enqueueWrite(
             write = {
                 char.value = data
                 gatt.writeCharacteristic(char)
             },
             onDone = { error ->
-                submissionError = error
-                latch.countDown()
+                completion.complete(error == null, "WRITE_FAILED")
             },
         )
         // GATT completion arrives on a Binder thread; wait for it so the
         // synchronous String? contract with BLEModule is preserved.
-        return try {
-            latch.await(10, java.util.concurrent.TimeUnit.SECONDS)
-            submissionError ?: "WRITE_TIMEOUT"
-        } catch (_: InterruptedException) {
-            "WRITE_TIMEOUT"
-        }
+        return completion.await(10, "WRITE_TIMEOUT")
     }
 
     /**
@@ -469,17 +462,29 @@ class BLEGattClient(private val context: Context) {
                 }
 
                 // Enable notifications on RX.
-                gatt.setCharacteristicNotification(rxChar, true)
+                if (!gatt.setCharacteristicNotification(rxChar, true)) {
+                    Log.w("ITANTRA_MVP", "CLIENT_SUBSCRIBE target=$deviceId localNotificationEnable=false")
+                    listener?.onError(deviceId, "NOTIFICATION_ENABLE_FAILED", "Could not enable local notifications for $deviceId")
+                    gatt.disconnect()
+                    return
+                }
                 val descriptor = rxChar.getDescriptor(BLEConstants.CCCD_UUID)
                 if (descriptor != null) {
                     descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                    gatt.writeDescriptor(descriptor)
+                    val accepted = gatt.writeDescriptor(descriptor)
+                    Log.d(
+                        "ITANTRA_MVP",
+                        "CLIENT_SUBSCRIBE target=$deviceId cccdFound=true writeAccepted=$accepted"
+                    )
+                    if (!accepted) {
+                        listener?.onError(deviceId, "NOTIFICATION_ENABLE_FAILED", "Could not write RX CCCD for $deviceId")
+                        gatt.disconnect()
+                    }
                 } else {
                     // CCCD not found — still connected, but notifications won't work.
-                    Log.w(TAG, "CCCD descriptor not found on RX characteristic for $deviceId")
-                    peer.isConnected = true
-                    syncLegacyState()
-                    listener?.onConnected(deviceId, peer.mtu)
+                    Log.w("ITANTRA_MVP", "CLIENT_SUBSCRIBE target=$deviceId cccdFound=false")
+                    listener?.onError(deviceId, "CCCD_NOT_FOUND", "RX CCCD not found for $deviceId")
+                    gatt.disconnect()
                 }
             }
 
@@ -508,6 +513,10 @@ class BLEGattClient(private val context: Context) {
                 if (characteristic.uuid == BLEConstants.RX_CHAR_UUID) {
                     val data = characteristic.value
                     if (data != null && data.isNotEmpty()) {
+                        Log.d(
+                            "ITANTRA_MVP",
+                            "BLE_RECEIVE from=$deviceId bytes=${data.size} path=CLIENT_NOTIFICATION"
+                        )
                         listener?.onDataReceived(deviceId, data)
                     }
                 }
@@ -521,6 +530,10 @@ class BLEGattClient(private val context: Context) {
                 val peer = validateCallback(deviceId, generation) ?: return
 
                 if (descriptor.characteristic?.uuid == BLEConstants.RX_CHAR_UUID) {
+                    Log.d(
+                        "ITANTRA_MVP",
+                        "CLIENT_SUBSCRIBE_CALLBACK target=$deviceId status=$status"
+                    )
                     if (status == BluetoothGatt.GATT_SUCCESS) {
                         // Notifications enabled — connection is fully established.
                         peer.isConnected = true
