@@ -291,6 +291,28 @@ describe('BitChatBLEAdapter ANNOUNCE handshake', () => {
     expect(a.getNodeIdForBlePeer('ble_B')).toBe(bNodeId);
   });
 
+  it('re-ANNOUNCE replaces stale BLE and NodeId indexes bijectively', () => {
+    const a = new BitChatBLEAdapter({
+      localNodeId: '0x00000000000000AA',
+      bleSend: async () => {},
+      onLocalDeliver: () => {},
+    });
+    const oldNode = normalizeNodeId('0x00000000000000BB');
+    const newNode = normalizeNodeId('0x00000000000000CC');
+
+    a.registerPeer('ble_B', oldNode);
+    a.registerPeer('ble_B', newNode);
+    expect(a.getNodeIdForBlePeer('ble_B')).toBe(newNode);
+    expect(a.getBlePeerForNodeId(oldNode)).toBeUndefined();
+    expect(a.getBlePeerForNodeId(newNode)).toBe('ble_B');
+
+    // A node moving to a new native connection key also removes the old
+    // direct route instead of leaving a stale send target behind.
+    a.registerPeer('ble_B_reconnected', newNode);
+    expect(a.getNodeIdForBlePeer('ble_B')).toBeUndefined();
+    expect(a.getBlePeerForNodeId(newNode)).toBe('ble_B_reconnected');
+  });
+
   it('onAnnounceReceived throwing never breaks packet processing', async () => {
     const a = new BitChatBLEAdapter({
       localNodeId: '0x00000000000000AA',

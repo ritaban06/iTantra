@@ -169,6 +169,20 @@ export class BitChatBLEAdapter {
   registerPeer(blePeerId: string, bitchatNodeId: NodeId): void {
     const normalized = normalizeNodeId(bitchatNodeId);
 
+    // Keep both indexes bijective. ANNOUNCE is connection-scoped and may be
+    // repeated after reconnect; leaving either old reverse entry alive can
+    // route a logical destination to a BLE key that is no longer connected.
+    const previousForBle = this.peerMappings.get(blePeerId);
+    if (previousForBle && previousForBle.bitchatNodeId !== normalized) {
+      this.reverseMappings.delete(previousForBle.bitchatNodeId);
+      this.peerRegistry.markDisconnected(previousForBle.bitchatNodeId);
+    }
+    const previousForNode = this.reverseMappings.get(normalized);
+    if (previousForNode && previousForNode.blePeerId !== blePeerId) {
+      this.peerMappings.delete(previousForNode.blePeerId);
+      this.peerRegistry.markDisconnected(normalized);
+    }
+
     const mapping: PeerMapping = { blePeerId, bitchatNodeId: normalized };
     this.peerMappings.set(blePeerId, mapping);
     this.reverseMappings.set(normalized, mapping);
@@ -186,7 +200,12 @@ export class BitChatBLEAdapter {
     if (mapping) {
       this.peerRegistry.markDisconnected(mapping.bitchatNodeId);
       this.peerMappings.delete(blePeerId);
-      this.reverseMappings.delete(mapping.bitchatNodeId);
+      // Delete only the reverse entry that still points at this connection.
+      // A newer reconnect may already have replaced it.
+      const reverse = this.reverseMappings.get(mapping.bitchatNodeId);
+      if (reverse?.blePeerId === blePeerId) {
+        this.reverseMappings.delete(mapping.bitchatNodeId);
+      }
       console.log(`[BitChatAdapter] Peer disconnected: ${blePeerId}`);
     }
   }
@@ -197,6 +216,11 @@ export class BitChatBLEAdapter {
 
   getBlePeerForNodeId(nodeId: NodeId): string | undefined {
     return this.reverseMappings.get(normalizeNodeId(nodeId))?.blePeerId;
+  }
+
+  /** Return the native BLE keys currently represented in the direct map. */
+  getDirectBlePeerIds(): string[] {
+    return Array.from(this.peerMappings.keys());
   }
 
   // ── ANNOUNCE ─────────────────────────────────────────────────

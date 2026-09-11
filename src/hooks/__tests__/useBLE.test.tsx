@@ -17,6 +17,7 @@ import { useBLE, PeerBLEState } from '../useBLE';
 
 jest.mock('../../native/NativeBLE', () => {
   const listeners = new Map<string, Set<(event?: any) => void>>();
+  let connectedDeviceIds: string[] = [];
 
   const subscribe = (name: string, cb: (event?: any) => void) => {
     let set = listeners.get(name);
@@ -74,6 +75,7 @@ jest.mock('../../native/NativeBLE', () => {
         deviceId: '',
         mtu: 23,
       })),
+      getConnectedDeviceIds: jest.fn(async () => connectedDeviceIds),
       // Event listeners
       onDeviceFound: (cb: (event?: any) => void) => subscribe(EVENT.DEVICE_FOUND, cb),
       onScanError: (cb: (event?: any) => void) => subscribe(EVENT.SCAN_ERROR, cb),
@@ -90,6 +92,9 @@ jest.mock('../../native/NativeBLE', () => {
     __emit: emit,
     __listenerCount: listenerCount,
     __clearListeners: clearListeners,
+    __setConnectedDeviceIds: (ids: string[]) => {
+      connectedDeviceIds = ids;
+    },
   };
 });
 
@@ -115,7 +120,7 @@ function connectedPeerIds(api: HookApi): string[] {
 // The hook's return value is captured into a mutable ref on every render so
 // assertions always observe the LATEST render, never a stale snapshot.
 
-async function renderUseBLE() {
+async function renderUseBLE(flushInit = true) {
   const apiRef: { current: HookApi | null } = { current: null };
   let renderer!: TestRenderer.ReactTestRenderer;
 
@@ -128,7 +133,7 @@ async function renderUseBLE() {
     renderer = TestRenderer.create(<Harness />);
   });
   // Flush the async init effect (isBluetoothEnabled / getDeviceId).
-  await act(async () => {});
+  if (flushInit) await act(async () => {});
 
   return { renderer, api: () => apiRef.current! };
 }
@@ -154,11 +159,52 @@ async function emitDisconnected(deviceId: string) {
 beforeEach(() => {
   jest.clearAllMocks();
   nativeMock.__clearListeners();
+  nativeMock.__setConnectedDeviceIds([]);
 });
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe('useBLE — per-peer connection state', () => {
+  it('hydration merges a later connection event instead of overwriting it', async () => {
+    let resolveHydration!: (ids: string[]) => void;
+    mockNativeBLE.getConnectedDeviceIds.mockImplementationOnce(
+      () => new Promise<string[]>((resolve) => {
+        resolveHydration = resolve;
+      }),
+    );
+    mockNativeBLE.getConnectionState.mockResolvedValue({
+      state: 'CONNECTED',
+      deviceId: 'SNAPSHOT',
+      mtu: 99,
+      role: 'CLIENT',
+    });
+
+    const { api } = await renderUseBLE(false);
+
+    // The native snapshot is still awaiting while a newer event arrives.
+    await emitConnected(247, 'EVENT');
+    expect(peerStateOf(api(), 'EVENT')?.state).toBe('CONNECTED');
+
+    await act(async () => {
+      resolveHydration(['SNAPSHOT']);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(peerStateOf(api(), 'EVENT')).toEqual({
+      deviceId: 'EVENT',
+      state: 'CONNECTED',
+      mtu: 247,
+      role: undefined,
+    });
+    expect(peerStateOf(api(), 'SNAPSHOT')).toEqual({
+      deviceId: 'SNAPSHOT',
+      state: 'CONNECTED',
+      mtu: 99,
+      role: 'CLIENT',
+    });
+  });
+
   it('1. initial peer map is empty with IDLE legacy state', async () => {
     const { api } = await renderUseBLE();
     expect(api().peers.size).toBe(0);

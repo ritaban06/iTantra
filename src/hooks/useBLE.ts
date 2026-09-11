@@ -122,6 +122,15 @@ export function useBLE() {
 
   // Per-peer connection state — the JS source of truth for BLE connections.
   const [peers, setPeers] = useState<Map<string, PeerBLEState>>(new Map());
+  // Per-peer mutation watermarks protect asynchronous native hydration from
+  // overwriting newer connection events or actions.
+  const peerMutationVersionsRef = useRef<Map<string, number>>(new Map());
+  const peerMapClearVersionRef = useRef(0);
+
+  const notePeerMutation = useCallback((deviceId: string): void => {
+    const versions = peerMutationVersionsRef.current;
+    versions.set(deviceId, (versions.get(deviceId) ?? 0) + 1);
+  }, []);
 
   const [lastReceivedData, setLastReceivedData] = useState<string | null>(null);
   const [receivedHistory, setReceivedHistory] = useState<Array<{ data: string; from: string; time: number }>>([]);
@@ -150,6 +159,61 @@ export function useBLE() {
         setBluetoothEnabled(enabled);
         const id = await NativeBLE.getDeviceId();
         setLocalDeviceId(id);
+
+        // Discovery and Home are separate hook instances. Hydrate Home from
+        // the native source of truth so a connection made before navigation
+        // is not rendered as disconnected and cannot diverge from send().
+        const getConnectedDeviceIds = (NativeBLE as any).getConnectedDeviceIds;
+        if (typeof getConnectedDeviceIds === 'function') {
+          try {
+            const hydrationVersions = new Map(peerMutationVersionsRef.current);
+            const hydrationClearVersion = peerMapClearVersionRef.current;
+            const ids = await getConnectedDeviceIds();
+            const connected = Array.isArray(ids) ? ids : [];
+            const hydrated = await Promise.all(connected.map(async (deviceId: string) => {
+              try {
+                const info = await NativeBLE.getConnectionState(deviceId);
+                if (info?.state && info.state !== 'CONNECTED') return null;
+                return {
+                  deviceId,
+                  state: 'CONNECTED' as ConnectionState,
+                  mtu: info?.mtu ?? 23,
+                  role: info?.role as PeerRole | undefined,
+                };
+              } catch {
+                return { deviceId, state: 'CONNECTED' as ConnectionState, mtu: 23 };
+              }
+            }));
+            const hydratedById = new Map(
+              hydrated
+                .filter((peer): peer is PeerBLEState => peer !== null)
+                .map((peer) => [peer.deviceId, peer]),
+            );
+            const connectedIds = new Set(connected);
+            setPeers((prev) => {
+              if (peerMapClearVersionRef.current !== hydrationClearVersion) return prev;
+
+              const next = new Map(prev);
+              for (const [deviceId, peer] of hydratedById) {
+                const changedAfterSnapshot =
+                  (peerMutationVersionsRef.current.get(deviceId) ?? 0) !==
+                  (hydrationVersions.get(deviceId) ?? 0);
+                if (!changedAfterSnapshot) next.set(deviceId, peer);
+              }
+              for (const deviceId of prev.keys()) {
+                const changedAfterSnapshot =
+                  (peerMutationVersionsRef.current.get(deviceId) ?? 0) !==
+                  (hydrationVersions.get(deviceId) ?? 0);
+                if (!connectedIds.has(deviceId) && !changedAfterSnapshot) {
+                  next.delete(deviceId);
+                }
+              }
+              return next;
+            });
+          } catch {
+            // Older native modules may not expose the reconciliation method.
+          }
+        }
       } catch (e: any) {
         setError(e.message);
       }
@@ -196,6 +260,7 @@ export function useBLE() {
     // the event so one peer's lifecycle never overwrites another's state.
     const connectingSub = NativeBLE.onConnecting((event: BLEConnectingEvent) => {
       setConnectionError(null);
+      notePeerMutation(event.deviceId);
       setPeers((prev) => {
         const existing = prev.get(event.deviceId);
         if (existing && existing.state === 'CONNECTED') return prev;
@@ -213,6 +278,7 @@ export function useBLE() {
     const connectedSub = NativeBLE.onConnected((event: BLEConnectedEvent) => {
       pendingConnectsRef.current.delete(event.deviceId);
       setConnectionError(null);
+      notePeerMutation(event.deviceId);
       setPeers((prev) => {
         const existing = prev.get(event.deviceId);
         const next = new Map(prev);
@@ -228,6 +294,7 @@ export function useBLE() {
 
     const disconnectedSub = NativeBLE.onDisconnected((event: BLEDisconnectedEvent) => {
       pendingConnectsRef.current.delete(event.deviceId);
+      notePeerMutation(event.deviceId);
       setPeers((prev) => {
         if (!prev.has(event.deviceId)) return prev;
         const next = new Map(prev);
@@ -263,6 +330,7 @@ export function useBLE() {
       if (pending.length === 1) {
         const peerId = pending[0];
         pendingConnectsRef.current.delete(peerId);
+        notePeerMutation(peerId);
         setPeers((prev) => {
           const existing = prev.get(peerId);
           if (!existing || existing.state !== 'CONNECTING') return prev;
@@ -287,7 +355,7 @@ export function useBLE() {
       NativeBLE.stopScanning().catch(() => {});
       NativeBLE.stopAdvertising().catch(() => {});
     };
-  }, []);
+  }, [notePeerMutation]);
 
   // ── Runtime permission request ──────────────────────────────────────
 
@@ -402,6 +470,7 @@ export function useBLE() {
   const connect = useCallback(async (deviceId: string) => {
     try {
       setConnectionError(null);
+      notePeerMutation(deviceId);
       setPeers((prev) => {
         const existing = prev.get(deviceId);
         if (existing && (existing.state === 'CONNECTED' || existing.state === 'CONNECTING')) {
@@ -427,6 +496,7 @@ export function useBLE() {
       // reconcile it. Otherwise revert our optimistic CONNECTING entry.
       const code: string | undefined = e?.code;
       if (code === 'ALREADY_CONNECTED' || code === 'ALREADY_CONNECTING') return;
+      notePeerMutation(deviceId);
       setPeers((prev) => {
         const existing = prev.get(deviceId);
         if (!existing || existing.state !== 'CONNECTING') return prev;
@@ -435,7 +505,7 @@ export function useBLE() {
         return next;
       });
     }
-  }, []);
+  }, [notePeerMutation]);
 
   /**
    * Disconnect one peer, or all peers when deviceId is omitted (legacy).
@@ -447,6 +517,7 @@ export function useBLE() {
   const disconnect = useCallback(async (deviceId?: string) => {
     try {
       if (deviceId) {
+        notePeerMutation(deviceId);
         await NativeBLE.disconnect(deviceId);
         pendingConnectsRef.current.delete(deviceId);
         setPeers((prev) => {
@@ -458,12 +529,13 @@ export function useBLE() {
       } else {
         await NativeBLE.disconnect();
         pendingConnectsRef.current.clear();
+        peerMapClearVersionRef.current += 1;
         setPeers(new Map());
       }
     } catch (e: any) {
       setConnectionError(e.message);
     }
-  }, []);
+  }, [notePeerMutation]);
 
   /**
    * Send data to a specific peer, or to the legacy connected peer when

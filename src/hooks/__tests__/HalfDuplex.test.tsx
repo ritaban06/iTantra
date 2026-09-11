@@ -521,4 +521,124 @@ describe('useBLEVoiceMode — half-duplex TX ownership', () => {
     expect(allowed).toBe(false);
     expect(api().txOwnership).toBe(TX_OWNER_NONE);
   });
+
+  it('39. BUSY does not leak into a later successful request', async () => {
+    const r = await renderHook();
+    api = r.api;
+    await enableVoice('B');
+
+    let firstAllowed: boolean | null = null;
+    await act(async () => {
+      const first = api().beginPttTurn().then((value) => {
+        firstAllowed = value;
+      });
+      await act(async () => {});
+      const request = txOpsSentTo('B').filter((op) => op.op === TX_OP_REQUEST).at(-1)!;
+      emitTx(TX_OP_GRANT, 0, request.requestId, 'B');
+      await first;
+    });
+    expect(firstAllowed).toBe(false);
+    expect(api().status).toBe('RECEIVING');
+
+    let secondAllowed: boolean | null = null;
+    await act(async () => {
+      const second = api().beginPttTurn().then((value) => {
+        secondAllowed = value;
+      });
+      await act(async () => {});
+      const request = txOpsSentTo('B').filter((op) => op.op === TX_OP_REQUEST).at(-1)!;
+      emitTx(TX_OP_GRANT, 902, request.requestId, 'B');
+      await second;
+    });
+    expect(secondAllowed).toBe(true);
+    expect(api().txOwnership).toBe(TX_OWNER_SELF);
+  });
+
+  it('39b. an in-flight retry does not reuse the previous BUSY outcome', async () => {
+    const r = await renderHook();
+    api = r.api;
+    await enableVoice('B');
+
+    await act(async () => {
+      const busy = api().beginPttTurn();
+      await act(async () => {});
+      const request = txOpsSentTo('B').filter((op) => op.op === TX_OP_REQUEST).at(-1)!;
+      emitTx(TX_OP_GRANT, 0, request.requestId, 'B');
+      await busy;
+    });
+    expect(api().status).toBe('RECEIVING');
+
+    let retry: Promise<boolean> | null = null;
+    await act(async () => {
+      retry = api().beginPttTurn();
+      await act(async () => {});
+    });
+
+    let duplicateAllowed: boolean | null = null;
+    await act(async () => {
+      duplicateAllowed = await api().beginPttTurn();
+    });
+    expect(duplicateAllowed).toBe(false);
+    expect(api().status).toBe('ERROR');
+
+    const request = txOpsSentTo('B').filter((op) => op.op === TX_OP_REQUEST).at(-1)!;
+    emitTx(TX_OP_GRANT, 904, request.requestId, 'B');
+    expect(retry ? await retry : null).toBe(true);
+  });
+
+  it('40. BUSY does not leak into a later native send failure', async () => {
+    const r = await renderHook();
+    api = r.api;
+    await enableVoice('B');
+
+    await act(async () => {
+      const first = api().beginPttTurn();
+      await act(async () => {});
+      const request = txOpsSentTo('B').filter((op) => op.op === TX_OP_REQUEST).at(-1)!;
+      emitTx(TX_OP_GRANT, 0, request.requestId, 'B');
+      await first;
+    });
+    expect(api().status).toBe('RECEIVING');
+
+    mockNativeBLE.send.mockRejectedValueOnce(new Error('NOT_CONNECTED'));
+    let secondAllowed: boolean | null = null;
+    await act(async () => {
+      secondAllowed = await api().beginPttTurn();
+    });
+    await settle();
+
+    expect(secondAllowed).toBe(false);
+    expect(api().status).toBe('ERROR');
+    expect(api().voiceError).toMatch(/native peer is not connected/i);
+  });
+
+  it('41. timeout does not leak into a later successful request', async () => {
+    const r = await renderHook();
+    api = r.api;
+    await enableVoice('B');
+
+    let first: Promise<boolean> | null = null;
+    await act(async () => {
+      first = api().beginPttTurn();
+      await act(async () => {});
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(1600);
+    });
+    expect(first ? await first : null).toBe(false);
+    expect(api().status).toBe('ERROR');
+
+    let secondAllowed: boolean | null = null;
+    await act(async () => {
+      const second = api().beginPttTurn().then((value) => {
+        secondAllowed = value;
+      });
+      await act(async () => {});
+      const request = txOpsSentTo('B').filter((op) => op.op === TX_OP_REQUEST).at(-1)!;
+      emitTx(TX_OP_GRANT, 903, request.requestId, 'B');
+      await second;
+    });
+    expect(secondAllowed).toBe(true);
+    expect(api().txOwnership).toBe(TX_OWNER_SELF);
+  });
 });

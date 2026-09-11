@@ -61,6 +61,7 @@ export interface ConnectionStateInfo {
   state: 'IDLE' | 'SCANNING' | 'CONNECTING' | 'CONNECTED' | 'DISCONNECTING';
   deviceId: string;
   mtu: number;
+  role?: 'CLIENT' | 'SERVER' | 'UNKNOWN';
 }
 
 // ── Module API ───────────────────────────────────────────────────────
@@ -103,6 +104,9 @@ export default {
 
   getConnectionState: (deviceId?: string): Promise<ConnectionStateInfo> =>
     deviceId ? NativeBLE.getConnectionState({ deviceId }) : NativeBLE.getConnectionState(null),
+
+  /** Return the native connection keys for every currently connected peer. */
+  getConnectedDeviceIds: (): Promise<string[]> => NativeBLE.getConnectedDeviceIds(),
 
   // ── V1 Event listeners ─────────────────────────────────────────────
 
