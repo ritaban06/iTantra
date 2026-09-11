@@ -59,6 +59,8 @@ export type LocalDeliverFn = (
   v6bPayload: Uint8Array,
   fromPeerId?: string,
   diagnosticId?: string,
+  sourceNodeId?: NodeId,
+  destinationNodeId?: NodeId,
 ) => void;
 
 export interface BitChatBLEAdapterParams {
@@ -160,7 +162,13 @@ export class BitChatBLEAdapter {
         `[ITANTRA_MVP] msgId=${packet.packetId} STEP=LOCAL_DELIVERY ` +
           `source=${packet.sourceNodeId} destination=${packet.destinationNodeId}`,
       );
-      this.onLocalDeliver(packet.payload, blePeerId, packet.packetId);
+      this.onLocalDeliver(
+        packet.payload,
+        blePeerId,
+        packet.packetId,
+        packet.sourceNodeId,
+        packet.destinationNodeId,
+      );
     };
 
     this.relayEngine = new RelayEngine({

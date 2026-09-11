@@ -57,6 +57,10 @@ import {
   clearVoiceMvpTrace,
   takeVoiceMvpTrace,
 } from '../diagnostics/VoiceMvpTrace';
+import {
+  receiveChatApplicationPayload,
+  registerChatTransport,
+} from '../messages';
 
 const { NativeSTT: NativeSTTModule } = NativeModules;
 const { NativeTTS } = NativeModules;
@@ -627,7 +631,24 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
    */
   const scheduleAnnounceRef = useRef<(peerId: string, force?: boolean) => void>(() => {});
   const getOrCreateAdapter = useCallback(async (): Promise<BitChatBLEAdapter> => {
-    if (bitchatAdapterRef.current) return bitchatAdapterRef.current;
+    const bindChatApplication = (adapter: BitChatBLEAdapter): void => {
+      registerChatTransport({
+        localNodeId: adapter.getLocalNodeId(),
+        originate: (payload, packetId, destinationNodeId, fragmentCount) =>
+          adapter.originate(payload, packetId, destinationNodeId, undefined, fragmentCount),
+        canRouteTo: (destinationNodeId) => {
+          const directBlePeer = adapter.getBlePeerForNodeId(destinationNodeId);
+          if (directBlePeer) return adapter.isDirectPeerReady(directBlePeer);
+          const discovered = adapter.getDiscoveredNodes().some(node => node.nodeId === destinationNodeId);
+          return discovered && adapter.getConnectedPeers().length > 0;
+        },
+      });
+    };
+
+    if (bitchatAdapterRef.current) {
+      bindChatApplication(bitchatAdapterRef.current);
+      return bitchatAdapterRef.current;
+    }
 
     // Get or create NodeIdStore
     if (!nodeIdStoreRef.current) {
@@ -658,8 +679,24 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         );
         await NativeBLE.send(bytesToBase64(v6bFrame), peerBleId, diagnosticId);
       },
-      onLocalDeliver: (v6bPayload: Uint8Array, fromPeerId?: string, diagnosticId?: string) => {
-        // Pass the V6B payload to the existing decode pipeline
+      onLocalDeliver: (
+        v6bPayload: Uint8Array,
+        fromPeerId?: string,
+        diagnosticId?: string,
+        sourceNodeId?: string,
+        destinationNodeId?: string,
+      ) => {
+        // Typed chat is an application payload inside the existing BITCHAT
+        // DATA frame. It never enters the voice decoder/TTS path. Every
+        // other payload keeps the established voice behavior unchanged.
+        if (receiveChatApplicationPayload(v6bPayload, {
+          fromPeerId,
+          sourceNodeId,
+          destinationNodeId,
+        })) {
+          return;
+        }
+        // Pass existing voice payloads to the established decode pipeline.
         processV6BPayload(v6bPayload, fromPeerId ?? 'unknown', diagnosticId);
       },
       onAnnounceReceived: (blePeerId: string) => {
@@ -673,6 +710,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       },
     });
     bitchatAdapterRef.current = adapter;
+    bindChatApplication(adapter);
     return adapter;
   }, [storageBackend, getOrCreatePeerReliability, processV6BPayload]);
 
@@ -1731,6 +1769,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       announceRetryTimersRef.current.clear();
       // V9E Step 10: drop the mesh-destination provider with the hook.
       registerMeshDestinationsProvider(null);
+      // The adapter belongs to this hook's lifecycle; do not leave a stale
+      // application sender bound after its BLE listeners are removed.
+      registerChatTransport(null);
       // Ensure mic is unmuted on cleanup.
       if (isMutedRef.current) {
         NativeSTT.unmuteMic();
