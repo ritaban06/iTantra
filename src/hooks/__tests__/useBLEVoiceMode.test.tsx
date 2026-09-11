@@ -2315,9 +2315,16 @@ describe('useBLEVoiceMode — ANNOUNCE bounded retry & handshake', () => {
     // No retry after disconnect.
     expect(await announceSendsTo('B')).toBe(0);
 
-    // Reconnect → fresh announce loop.
-    await announceToConnectedPeer('B');
-    expect(await announceSendsTo('B')).toBe(1);
+    // Reconnect under a new native BLE key → fresh announce loop.
+    await announceToConnectedPeer('B_reconnected');
+    expect(await announceSendsTo('B_reconnected')).toBe(1);
+
+    // The new key has one bounded initial send and no duplicate loop.
+    await act(async () => {
+      jest.advanceTimersByTime(20000);
+    });
+    await settle();
+    expect(await announceSendsTo('B_reconnected')).toBe(1);
   });
 
   it('incoming ANNOUNCE answers with our own ANNOUNCE; duplicate ANNOUNCE triggers no further answer (no loop)', async () => {

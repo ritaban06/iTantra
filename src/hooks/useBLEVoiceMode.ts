@@ -238,6 +238,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   // Pending REQUEST resolvers per peer — resolved by the matching GRANT
   // (or by timeout) in requestTxOwnership below.
   const txRequestResolversRef = useRef<Map<string, (v: number | null) => void>>(new Map());
+  // Distinguishes a busy remote from a request that never reached a live
+  // native connection. Both return null to the caller, but only the former
+  // is a legitimate RECEIVING/WAITING state.
+  type TxRequestOutcome = 'NONE' | 'BUSY' | 'UNREACHABLE' | 'TIMEOUT';
+  const txRequestOutcomeRef = useRef<Map<string, TxRequestOutcome>>(new Map());
   // BLE peer that currently owns the link (either role) — used for the
   // remote-turn watchdog and for targeted RELEASE dispatch.
   const txOwningPeerRef = useRef<string | null>(null);
@@ -579,7 +584,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
    * scheduleAnnounceRef so the (later-defined) bounded-retry sender is
    * always reached with the freshest closure, independent of definition order.
    */
-  const scheduleAnnounceRef = useRef<(peerId: string) => void>(() => {});
+  const scheduleAnnounceRef = useRef<(peerId: string, force?: boolean) => void>(() => {});
   const getOrCreateAdapter = useCallback(async (): Promise<BitChatBLEAdapter> => {
     if (bitchatAdapterRef.current) return bitchatAdapterRef.current;
 
@@ -611,7 +616,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         // with our own ANNOUNCE if the peer has not registered us yet. This
         // makes registration symmetric even when the peer's connection-time
         // ANNOUNCE was sent too early (server role, before our CCCD write).
-        scheduleAnnounceRef.current(blePeerId);
+        scheduleAnnounceRef.current(blePeerId, true);
       },
     });
     bitchatAdapterRef.current = adapter;
@@ -626,6 +631,11 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       announceRetryTimersRef.current.delete(peerId);
     }
   }, []);
+
+  const resetAnnounceState = useCallback((peerId: string): void => {
+    announcedPeersRef.current.delete(peerId);
+    clearAnnounceRetry(peerId);
+  }, [clearAnnounceRetry]);
 
   // ── Half-duplex TX ownership control plane ─────────────────────
 
@@ -650,15 +660,22 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
    */
   const requestTxOwnership = useCallback(
     async (peerId: string): Promise<number | null> => {
-      // Link liveness: the peer must be connected. Peers seen via the
-      // CONNECTED event are tracked in connectedPeersRef; a connection
-      // established BEFORE this hook mounted is covered by the native
-      // connection-state fallback (single-peer legacy path).
-      if (!connectedPeersRef.current.has(peerId)) {
+      // Every request starts clean. Outcomes are keyed by native BLE peer so
+      // a prior BUSY/TIMEOUT result cannot leak into a later request.
+      txRequestOutcomeRef.current.set(peerId, 'NONE');
+      // Link liveness is checked against the SAME native key that will be
+      // passed to send(). The legacy no-argument query can report a different
+      // primary peer when multiple connections or a reconnect are present.
+      if (typeof (NativeBLE as any).getConnectedDeviceIds === 'function') {
         try {
-          const info = await NativeBLE.getConnectionState();
-          if (!(info?.state === 'CONNECTED' && info.deviceId === peerId)) return null;
+          const info = await NativeBLE.getConnectionState(peerId);
+          if (!(info?.state === 'CONNECTED' && info.deviceId === peerId)) {
+            connectedPeersRef.current.delete(peerId);
+            txRequestOutcomeRef.current.set(peerId, 'UNREACHABLE');
+            return null;
+          }
         } catch {
+          txRequestOutcomeRef.current.set(peerId, 'UNREACHABLE');
           return null;
         }
       }
@@ -681,12 +698,14 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         await sendTxControl(peerId, TX_OP_REQUEST, 0, requestId);
       } catch {
         txRequestResolversRef.current.delete(peerId);
+        txRequestOutcomeRef.current.set(peerId, 'UNREACHABLE');
         return null;
       }
       // Bounded wait: an unanswered/lost REQUEST must not block PTT forever.
       const timer = setTimeout(() => {
         if (txRequestResolversRef.current.get(peerId) === resolveFn) {
           txRequestResolversRef.current.delete(peerId);
+          txRequestOutcomeRef.current.set(peerId, 'TIMEOUT');
           resolveFn(null);
         }
       }, 1500);
@@ -781,7 +800,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         // Consume the request slot NOW — a granted/answered request must
         // free the peer's slot or the next PTT could never request again.
         txRequestResolversRef.current.delete(peerId);
-        resolver(isGrantAccepted(ctrl) ? ctrl.txId : null);
+        const accepted = isGrantAccepted(ctrl);
+        txRequestOutcomeRef.current.set(peerId, accepted ? 'NONE' : 'BUSY');
+        resolver(accepted ? ctrl.txId : null);
         if (isGrantAccepted(ctrl)) {
           txIdRef.current = ctrl.txId;
           txOwningPeerRef.current = peerId;
@@ -845,8 +866,15 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
    * ANNOUNCE is idempotent) and gives both sides multiple chances to learn
    * each other's identity on a lossy/too-early first exchange.
    */
-  const scheduleAnnounceToPeer = useCallback((peerId: string): void => {
+  const scheduleAnnounceToPeer = useCallback((peerId: string, force = false): void => {
     if (announcedPeersRef.current.has(peerId)) return;
+    if (announceRetryTimersRef.current.has(peerId)) {
+      // An incoming ANNOUNCE is a handshake-healing signal: replace the
+      // existing retry schedule with an immediate response. Ordinary
+      // connection/reconciliation calls remain idempotent.
+      if (!force) return;
+      clearAnnounceRetry(peerId);
+    }
     sendAnnounceToPeer(peerId).catch(() => {});
 
     // Bounded retry loop — cancelled by clearAnnounceRetry on success/disconnect.
@@ -878,6 +906,54 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
   // Keep the announce-dispatch ref current so the adapter's
   // onAnnounceReceived always uses the latest sender.
   scheduleAnnounceRef.current = scheduleAnnounceToPeer;
+
+  /**
+   * Reconcile connections that were established before this hook mounted.
+   * Discovery owns the native connection lifecycle, so relying only on a
+   * future BLE_CONNECTED event loses the first-send path when the user
+   * navigates from Devices to Home after connecting.
+   */
+  const reconcileConnectedPeers = useCallback(async (): Promise<void> => {
+    try {
+      const getConnectedDeviceIds = (NativeBLE as any).getConnectedDeviceIds;
+      let ids: unknown = [];
+      const hasNativePeerList = typeof getConnectedDeviceIds === 'function';
+      if (typeof getConnectedDeviceIds === 'function') {
+        ids = await getConnectedDeviceIds();
+      }
+      const liveIds = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && id.length > 0) : [];
+      const live = new Set(liveIds);
+      connectedPeersRef.current.forEach((id) => {
+        if (!live.has(id)) connectedPeersRef.current.delete(id);
+      });
+      liveIds.forEach((peerId) => {
+        connectedPeersRef.current.add(peerId);
+      });
+      // Adapter creation may wait on persisted identity storage. Native
+      // connection reconciliation must not block PTT on that unrelated
+      // initialization; announce as soon as the adapter is ready.
+      getOrCreateAdapter()
+        .then((adapter) => {
+          if (hasNativePeerList) {
+            adapter.getDirectBlePeerIds()
+              .filter((peerId) => !live.has(peerId))
+              .forEach((peerId) => {
+                resetAnnounceState(peerId);
+                adapter.unregisterPeer(peerId);
+              });
+          }
+          liveIds.forEach((peerId) => scheduleAnnounceToPeer(peerId));
+          if (liveIds.length > 0) {
+            console.log(`[BLE Voice][CONNECTION] reconciled peers=${liveIds.join(',')} adapter=${adapter.getLocalNodeId()}`);
+          }
+        })
+        .catch((err) => {
+          console.warn(`[BLE Voice][CONNECTION] adapter reconciliation failed: ${String(err)}`);
+        });
+    } catch (err) {
+      console.warn(`[BLE Voice][CONNECTION] peer reconciliation failed: ${String(err)}`);
+    }
+  }, [getOrCreateAdapter, resetAnnounceState, scheduleAnnounceToPeer]);
 
   // Keep the hook's React state in sync with the shared destination store.
   useEffect(() => {
@@ -1453,9 +1529,8 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
       // V9E Step 9: a new connection to the same BLE device must re-announce
       // (connection-scoped ANNOUNCE, independent of voice mode).
       if (disconnectedPeerId) {
-        announcedPeersRef.current.delete(disconnectedPeerId);
         connectedPeersRef.current.delete(disconnectedPeerId);
-        clearAnnounceRetry(disconnectedPeerId);
+        resetAnnounceState(disconnectedPeerId);
       }
       // Half-duplex: a disconnect always releases link ownership — the lock
       // belongs to the CONNECTION, so it cannot survive a lost link. Both
@@ -1480,7 +1555,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     // V9E Step 9: the BITCHAT adapter is owned by the hook's MOUNT
     // lifecycle, not by voice mode. Initializing it here (once, on mount)
     // means mesh relay participation exists even when voice mode is off.
-    getOrCreateAdapter().catch(() => {});
+    reconcileConnectedPeers().catch(() => {});
 
     // V9E Step 10: register the mesh-destination provider so other screens
     // (ConnectScreen) can offer destination selection without owning the
@@ -1524,7 +1599,7 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
         isMutedRef.current = false;
       }
     };
-  }, [enabled, getOrCreatePeerReliability, getOrCreateAdapter, routeAckFromPeer, routeNackFromPeer, sendAckToPeer, sendInitialData, scheduleAnnounceToPeer, clearAnnounceRetry, buildMeshDestinations]);
+  }, [enabled, getOrCreatePeerReliability, getOrCreateAdapter, reconcileConnectedPeers, routeAckFromPeer, routeNackFromPeer, sendAckToPeer, sendInitialData, scheduleAnnounceToPeer, clearAnnounceRetry, resetAnnounceState, buildMeshDestinations]);
 
   // ── V7 reassembly cleanup timer (voice-mode-scoped) ───────────────
   //
@@ -1564,6 +1639,9 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     if (txOwnerRef.current === TX_OWNER_SELF) return true;
     // Remote owns the link: hard WAIT — no STT for an outgoing message.
     if (txOwnerRef.current === TX_OWNER_REMOTE) return false;
+    // Refresh the native peer list so a connection made on the Discovery
+    // screen before Home mounted is eligible for the first PTT turn.
+    await reconcileConnectedPeers();
     // Pick the turn target: primary connected peer, else the native
     // connection view (legacy direct path without BITCHAT).
     const primaryPeer = [...connectedPeersRef.current][0];
@@ -1574,13 +1652,24 @@ export function useBLEVoiceMode(languageCode: string = 'en') {
     }
     const grantedTxId = await requestTxOwnership(target);
     if (!grantedTxId) {
-      // Denied or timed out — remote side is transmitting; show WAIT.
-      setStatus('RECEIVING');
+      // Only an explicit zero-token grant means the remote owns the turn.
+      // A transport failure/timeout is an error, never RECEIVING; otherwise
+      // both phones can falsely render "Receiving..." when neither can send.
+      const outcome = txRequestOutcomeRef.current.get(target) ?? 'NONE';
+      if (outcome === 'BUSY') {
+        setStatus('RECEIVING');
+      } else {
+        const reason = outcome === 'TIMEOUT'
+          ? 'TX ownership request timed out'
+          : 'TX ownership request failed: native peer is not connected';
+        setVoiceError(reason);
+        setStatus('ERROR');
+      }
       return false;
     }
     txOwningPeerRef.current = target;
     return true;
-  }, [requestTxOwnership]);
+  }, [reconcileConnectedPeers, requestTxOwnership]);
 
   /**
    * End the local PTT turn: release ownership so the peer can talk.
