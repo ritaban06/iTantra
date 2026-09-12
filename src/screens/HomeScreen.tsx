@@ -149,11 +149,11 @@ export default function HomeScreen({ navigation }: { navigation: any }) {
       </View>
 
       {/* ── Language Pair ─────────────────────────────────────────── */}
-      <TouchableOpacity style={styles.languageBox} onPress={() => navigation.navigate('Language')}>
+      {/*<TouchableOpacity style={styles.languageBox} onPress={() => navigation.navigate('Language')}>
         <Text style={styles.languageText}>
           {partnerLanguageName}  <Text style={styles.languageArrows}>⇄</Text>  {languageName}
         </Text>
-      </TouchableOpacity>
+      </TouchableOpacity> */}
 
       {/* ── PTT Button ────────────────────────────────────────────── */}
       <View style={styles.pttContainer}>
